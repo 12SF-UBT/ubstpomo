@@ -62,20 +62,21 @@ export function OverlayView() {
   // Listen for real-time broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
+      if (!data || typeof data !== 'object') return;
       setOverlayState((prev) => ({
         ...prev,
-        timeLeft: data.timeLeft !== undefined ? data.timeLeft : prev.timeLeft,
+        timeLeft: typeof data.timeLeft === 'number' ? data.timeLeft : prev.timeLeft,
         targetEndTime: data.targetEndTime !== undefined ? data.targetEndTime : prev.targetEndTime,
         status: data.status || prev.status,
-        sessionName: data.sessionName || prev.sessionName,
-        sessionType: data.sessionType || prev.sessionType,
-        sessionProgressText: data.sessionProgressText || prev.sessionProgressText,
-        overlayFontSize: data.overlayFontSize !== undefined ? data.overlayFontSize : prev.overlayFontSize,
-        overlayColor: data.overlayColor !== undefined ? data.overlayColor : prev.overlayColor,
+        sessionName: data.sessionName || prev.sessionName || 'STUDY',
+        sessionType: data.sessionType || prev.sessionType || 'study',
+        sessionProgressText: data.sessionProgressText || prev.sessionProgressText || 'Session 1/4',
+        overlayFontSize: typeof data.overlayFontSize === 'number' ? data.overlayFontSize : prev.overlayFontSize,
+        overlayColor: data.overlayColor || prev.overlayColor,
         overlayLabelColor: data.overlayLabelColor || prev.overlayLabelColor,
-        overlayLabelFontSize: data.overlayLabelFontSize !== undefined ? data.overlayLabelFontSize : prev.overlayLabelFontSize,
-        overlayShowLabel: data.overlayShowLabel !== undefined ? data.overlayShowLabel : prev.overlayShowLabel,
-        overlayShowSessionCount: data.overlayShowSessionCount !== undefined ? data.overlayShowSessionCount : prev.overlayShowSessionCount,
+        overlayLabelFontSize: typeof data.overlayLabelFontSize === 'number' ? data.overlayLabelFontSize : prev.overlayLabelFontSize,
+        overlayShowLabel: typeof data.overlayShowLabel === 'boolean' ? data.overlayShowLabel : prev.overlayShowLabel,
+        overlayShowSessionCount: typeof data.overlayShowSessionCount === 'boolean' ? data.overlayShowSessionCount : prev.overlayShowSessionCount,
         overlayFontFamily: data.overlayFontFamily || prev.overlayFontFamily,
       }));
     });

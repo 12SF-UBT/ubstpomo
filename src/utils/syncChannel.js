@@ -37,11 +37,21 @@ export const syncChannel = {
 
   subscribe(callback) {
     this.init();
+    let lastTimestamp = 0;
+
+    const processData = (data) => {
+      if (data && typeof data === 'object' && data.timestamp) {
+        if (data.timestamp >= lastTimestamp) {
+          lastTimestamp = data.timestamp;
+          callback(data);
+        }
+      }
+    };
     
     // 1. Listen via BroadcastChannel
     const handler = (event) => {
       if (event && event.data) {
-        callback(event.data);
+        processData(event.data);
       }
     };
 
@@ -58,26 +68,26 @@ export const syncChannel = {
           if (event && event.data) {
             try {
               const data = JSON.parse(event.data);
-              callback(data);
+              processData(data);
             } catch (e) {}
           }
         };
       } catch (e) {}
     }
 
-    // 3. Fallback HTTP Poll every 400ms if SSE or BroadcastChannel are disconnected
+    // 3. Fallback HTTP Poll every 500ms if SSE or BroadcastChannel are disconnected
     const pollInterval = setInterval(() => {
       if (typeof fetch !== 'undefined') {
         fetch('/api/sync')
           .then(res => res.json())
           .then(data => {
             if (data && data.timestamp) {
-              callback(data);
+              processData(data);
             }
           })
           .catch(() => {});
       }
-    }, 400);
+    }, 500);
 
     return () => {
       if (this.channel) {
