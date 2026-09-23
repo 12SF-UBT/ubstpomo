@@ -18,9 +18,13 @@ export function OverlayView() {
       timeLeft: 50 * 60,
       sessionName: 'STUDY',
       sessionType: 'study',
+      sessionProgressText: 'Session 1 / 4',
       overlayFontSize: 140,
       overlayColor: '#ffffff',
+      overlayLabelColor: '#fef08a',
+      overlayLabelFontSize: 36,
       overlayShowLabel: true,
+      overlayShowSessionCount: true,
       overlayFontFamily: 'mono'
     };
 
@@ -30,7 +34,10 @@ export function OverlayView() {
         const parsed = JSON.parse(saved);
         defaults.overlayFontSize = parsed.overlayFontSize || 140;
         defaults.overlayColor = parsed.overlayColor || '#ffffff';
+        defaults.overlayLabelColor = parsed.overlayLabelColor || '#fef08a';
+        defaults.overlayLabelFontSize = parsed.overlayLabelFontSize || 36;
         defaults.overlayShowLabel = parsed.overlayShowLabel !== false;
+        defaults.overlayShowSessionCount = parsed.overlayShowSessionCount !== false;
         defaults.overlayFontFamily = parsed.overlayFontFamily || 'mono';
         defaults.timeLeft = (parsed.studyDuration || 50) * 60;
       }
@@ -58,9 +65,13 @@ export function OverlayView() {
         timeLeft: data.timeLeft !== undefined ? data.timeLeft : prev.timeLeft,
         sessionName: data.sessionName || prev.sessionName,
         sessionType: data.sessionType || prev.sessionType,
+        sessionProgressText: data.sessionProgressText || prev.sessionProgressText,
         overlayFontSize: data.overlayFontSize !== undefined ? data.overlayFontSize : prev.overlayFontSize,
         overlayColor: data.overlayColor !== undefined ? data.overlayColor : prev.overlayColor,
+        overlayLabelColor: data.overlayLabelColor || prev.overlayLabelColor,
+        overlayLabelFontSize: data.overlayLabelFontSize !== undefined ? data.overlayLabelFontSize : prev.overlayLabelFontSize,
         overlayShowLabel: data.overlayShowLabel !== undefined ? data.overlayShowLabel : prev.overlayShowLabel,
+        overlayShowSessionCount: data.overlayShowSessionCount !== undefined ? data.overlayShowSessionCount : prev.overlayShowSessionCount,
         overlayFontFamily: data.overlayFontFamily || prev.overlayFontFamily,
       }));
     });
@@ -70,23 +81,13 @@ export function OverlayView() {
 
   const formattedTime = formatTime(overlayState.timeLeft);
 
-  return (
-    <div className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent">
-      {/* Session Label (Optional) */}
-      {overlayState.overlayShowLabel && (
-        <div
-          className="text-xs font-bold uppercase tracking-widest px-3 py-1 rounded-full mb-1 border shadow-sm backdrop-blur-sm"
-          style={{
-            color: overlayState.overlayColor,
-            borderColor: `${overlayState.overlayColor}40`,
-            backgroundColor: 'rgba(0, 0, 0, 0.4)',
-            textShadow: '0 2px 4px rgba(0,0,0,0.8)',
-          }}
-        >
-          {overlayState.sessionName || 'STUDY'}
-        </div>
-      )}
+  // Clean session count string, e.g., "Session 2/4" or "Session 2 / 4"
+  const cleanSessionCount = (overlayState.sessionProgressText || '')
+    .replace(' / ', '/')
+    .replace('Break after ', 'Break ');
 
+  return (
+    <div className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4">
       {/* Large Timer Digits */}
       <div
         className={`font-bold tracking-tight leading-none transition-all duration-150 ${
@@ -95,11 +96,36 @@ export function OverlayView() {
         style={{
           fontSize: `${overlayState.overlayFontSize}px`,
           color: overlayState.overlayColor,
-          textShadow: '0 4px 16px rgba(0,0,0,0.95), 0 2px 4px rgba(0,0,0,0.8)',
+          textShadow: '0 4px 16px rgba(0,0,0,0.95), 0 2px 4px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.5)',
         }}
       >
         {formattedTime}
       </div>
+
+      {/* Session Label & Automatic Counter Display */}
+      {(overlayState.overlayShowLabel || overlayState.overlayShowSessionCount) && (
+        <div
+          className="font-medium tracking-normal mt-2 transition-all duration-150 text-center flex items-center justify-center gap-2"
+          style={{
+            fontSize: `${overlayState.overlayLabelFontSize}px`,
+            color: overlayState.overlayLabelColor || '#fef08a',
+            textShadow: '0 3px 10px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.9), 0 0 12px rgba(0,0,0,0.7)',
+            fontFamily: 'Georgia, Cambria, "Times New Roman", Times, serif',
+          }}
+        >
+          {overlayState.overlayShowLabel && (
+            <span>{overlayState.sessionName || 'STUDY'}</span>
+          )}
+
+          {overlayState.overlayShowLabel && overlayState.overlayShowSessionCount && (
+            <span className="opacity-70">•</span>
+          )}
+
+          {overlayState.overlayShowSessionCount && (
+            <span>{cleanSessionCount || 'Session 1/4'}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -67,12 +67,12 @@ export function OverlaySettings() {
       </div>
 
       {/* Customizations Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-        {/* Font Size */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 pt-2">
+        {/* Timer Font Size */}
         <div>
           <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 mb-1">
             <Type className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Font Size (px)</span>
+            <span>Timer Size (px)</span>
           </label>
           <input
             type="number"
@@ -85,32 +85,71 @@ export function OverlaySettings() {
           />
         </div>
 
-        {/* Text Color */}
+        {/* Timer Digits Color */}
         <div>
           <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 mb-1">
             <Palette className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Text Color</span>
+            <span>Timer Color</span>
           </label>
           <div className="flex items-center gap-2">
             <input
               type="color"
-              value={settings.overlayColor}
+              value={settings.overlayColor || '#ffffff'}
               onChange={(e) => updateSettings({ overlayColor: e.target.value })}
               className="w-8 h-8 rounded-lg bg-transparent border-0 cursor-pointer"
             />
             <input
               type="text"
-              value={settings.overlayColor}
+              value={settings.overlayColor || '#ffffff'}
               onChange={(e) => updateSettings({ overlayColor: e.target.value })}
               className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
             />
           </div>
         </div>
 
-        {/* Session Label Toggle */}
+        {/* Label & Counter Color (Yellow default) */}
+        <div>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-amber-300 mb-1">
+            <Palette className="w-3.5 h-3.5 text-amber-400" />
+            <span>Session Text Color</span>
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={settings.overlayLabelColor || '#fef08a'}
+              onChange={(e) => updateSettings({ overlayLabelColor: e.target.value })}
+              className="w-8 h-8 rounded-lg bg-transparent border-0 cursor-pointer"
+            />
+            <input
+              type="text"
+              value={settings.overlayLabelColor || '#fef08a'}
+              onChange={(e) => updateSettings({ overlayLabelColor: e.target.value })}
+              className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+
+        {/* Label & Counter Font Size */}
+        <div>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 mb-1">
+            <Type className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Label & Counter Size (px)</span>
+          </label>
+          <input
+            type="number"
+            min="12"
+            max="120"
+            step="2"
+            value={settings.overlayLabelFontSize || 36}
+            onChange={(e) => updateSettings({ overlayLabelFontSize: parseInt(e.target.value, 10) || 36 })}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+          />
+        </div>
+
+        {/* Study/Break Label Toggle */}
         <div>
           <label className="block text-xs font-semibold text-slate-400 mb-1">
-            Session Label
+            Study/Break Label
           </label>
           <button
             onClick={() => updateSettings({ overlayShowLabel: !settings.overlayShowLabel })}
@@ -120,7 +159,24 @@ export function OverlaySettings() {
                 : 'bg-slate-950 text-slate-500 border-slate-800'
             }`}
           >
-            {settings.overlayShowLabel ? 'Label ON' : 'Label OFF'}
+            {settings.overlayShowLabel ? 'Study/Break Label ON' : 'Label OFF'}
+          </button>
+        </div>
+
+        {/* Session Counter Toggle */}
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">
+            Session Counter (Session 2/4)
+          </label>
+          <button
+            onClick={() => updateSettings({ overlayShowSessionCount: !settings.overlayShowSessionCount })}
+            className={`w-full py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+              settings.overlayShowSessionCount
+                ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                : 'bg-slate-950 text-slate-500 border-slate-800'
+            }`}
+          >
+            {settings.overlayShowSessionCount ? 'Counter ON' : 'Counter OFF'}
           </button>
         </div>
       </div>

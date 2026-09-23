@@ -37,7 +37,10 @@ const DEFAULT_SETTINGS = {
   // Overlay customizations
   overlayFontSize: 140, // in px
   overlayColor: '#ffffff',
+  overlayLabelColor: '#fef08a', // warm yellow as in user image
+  overlayLabelFontSize: 36, // in px
   overlayShowLabel: true,
+  overlayShowSessionCount: true,
   overlayFontFamily: 'mono', // 'mono' | 'sans'
 };
 
@@ -165,7 +168,10 @@ export function TimerProvider({ children }) {
       loopProgressText: sessionInfo.loopText,
       overlayFontSize: settings.overlayFontSize,
       overlayColor: settings.overlayColor,
+      overlayLabelColor: settings.overlayLabelColor || '#fef08a',
+      overlayLabelFontSize: settings.overlayLabelFontSize || 36,
       overlayShowLabel: settings.overlayShowLabel,
+      overlayShowSessionCount: settings.overlayShowSessionCount !== false,
       overlayFontFamily: settings.overlayFontFamily,
       timestamp: Date.now()
     };
