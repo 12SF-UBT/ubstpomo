@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { syncChannel } from '../utils/syncChannel';
 
-const SETTINGS_KEY = 'ubst_pomo_settings_v1';
-const LIVE_STATE_KEY = 'ubst_pomo_live_state_v1';
+const STORAGE_KEY = 'ubst_pomo_settings_v1';
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -31,34 +30,29 @@ export function OverlayView() {
     };
 
     try {
-      const liveSaved = localStorage.getItem(LIVE_STATE_KEY);
-      if (liveSaved) {
-        const parsedLive = JSON.parse(liveSaved);
-        defaults = { ...defaults, ...parsedLive };
-        if (parsedLive.status === 'running' && parsedLive.targetEndTime) {
-          const remSec = Math.max(0, Math.ceil((parsedLive.targetEndTime - Date.now()) / 1000));
-          defaults.timeLeft = remSec;
-        }
-      } else {
-        const savedSettings = localStorage.getItem(SETTINGS_KEY);
-        if (savedSettings) {
-          const parsed = JSON.parse(savedSettings);
-          defaults.overlayFontSize = parsed.overlayFontSize || defaults.overlayFontSize;
-          defaults.overlayColor = parsed.overlayColor || defaults.overlayColor;
-          defaults.overlayLabelColor = parsed.overlayLabelColor || defaults.overlayLabelColor;
-          defaults.overlayLabelFontSize = parsed.overlayLabelFontSize || defaults.overlayLabelFontSize;
-          defaults.overlayShowLabel = parsed.overlayShowLabel !== false;
-          defaults.overlayShowSessionCount = parsed.overlayShowSessionCount !== false;
-          defaults.overlayFontFamily = parsed.overlayFontFamily || defaults.overlayFontFamily;
-          defaults.timeLeft = (parsed.studyDuration || 50) * 60;
-        }
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        defaults = {
+          ...defaults,
+          overlayFontSize: parsed.overlayFontSize || defaults.overlayFontSize,
+          overlayColor: parsed.overlayColor || defaults.overlayColor,
+          overlayLabelColor: parsed.overlayLabelColor || defaults.overlayLabelColor,
+          overlayLabelFontSize: parsed.overlayLabelFontSize || defaults.overlayLabelFontSize,
+          overlayShowLabel: parsed.overlayShowLabel !== false,
+          overlayShowSessionCount: parsed.overlayShowSessionCount !== false,
+          overlayFontFamily: parsed.overlayFontFamily || defaults.overlayFontFamily,
+          timeLeft: (parsed.studyDuration || 50) * 60,
+        };
       }
-    } catch (e) {}
+    } catch (e) {
+      console.debug('Failed to load overlay settings from storage:', e);
+    }
 
     return defaults;
   });
 
-  // Transparent background styling
+  // Set transparent background on mount
   useEffect(() => {
     const styleOverlay = () => {
       document.documentElement.style.background = 'transparent';
@@ -81,7 +75,8 @@ export function OverlayView() {
     };
   }, []);
 
-  // Smooth target-time countdown ticker inside Camo Studio
+  // Continuous system-clock countdown ticker (every 250ms)
+  // Ticks even if main window is minimized because it's based on targetEndTime
   useEffect(() => {
     if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
       return;
@@ -93,38 +88,53 @@ export function OverlayView() {
       const remainingSec = Math.ceil(remainingMs / 1000);
       
       setOverlayState((prev) => {
-        if (prev.timeLeft === remainingSec) return prev;
+        if (prev.timeLeft === remainingSec) {
+          return prev;
+        }
         return { ...prev, timeLeft: remainingSec };
       });
     };
 
+    // Initial update
     updateDisplayTime();
+
+    // Set up tick interval
     const interval = setInterval(updateDisplayTime, 250);
 
     return () => clearInterval(interval);
   }, [overlayState.status, overlayState.targetEndTime]);
 
-  // Subscribe to real-time state broadcasts
+  // Listen for real-time state broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
-      if (!data || typeof data !== 'object') return;
+      if (!data || typeof data !== 'object') {
+        return;
+      }
 
-      setOverlayState((prev) => ({
-        ...prev,
-        timeLeft: typeof data.timeLeft === 'number' ? data.timeLeft : prev.timeLeft,
-        targetEndTime: data.targetEndTime !== undefined ? data.targetEndTime : prev.targetEndTime,
-        status: data.status || prev.status,
-        sessionName: data.sessionName || prev.sessionName || 'STUDY',
-        sessionType: data.sessionType || prev.sessionType || 'study',
-        sessionProgressText: data.sessionProgressText || prev.sessionProgressText || 'Session 1/4',
-        overlayFontSize: typeof data.overlayFontSize === 'number' ? data.overlayFontSize : prev.overlayFontSize,
-        overlayColor: data.overlayColor || prev.overlayColor,
-        overlayLabelColor: data.overlayLabelColor || prev.overlayLabelColor,
-        overlayLabelFontSize: typeof data.overlayLabelFontSize === 'number' ? data.overlayLabelFontSize : prev.overlayLabelFontSize,
-        overlayShowLabel: typeof data.overlayShowLabel === 'boolean' ? data.overlayShowLabel : prev.overlayShowLabel,
-        overlayShowSessionCount: typeof data.overlayShowSessionCount === 'boolean' ? data.overlayShowSessionCount : prev.overlayShowSessionCount,
-        overlayFontFamily: data.overlayFontFamily || prev.overlayFontFamily,
-      }));
+      setOverlayState((prev) => {
+        const nextState = {
+          timeLeft: typeof data.timeLeft === 'number' ? data.timeLeft : prev.timeLeft,
+          targetEndTime: data.targetEndTime !== undefined ? data.targetEndTime : prev.targetEndTime,
+          status: data.status || prev.status,
+          sessionName: data.sessionName || prev.sessionName || 'STUDY',
+          sessionType: data.sessionType || prev.sessionType || 'study',
+          sessionProgressText: data.sessionProgressText || prev.sessionProgressText || 'Session 1/4',
+          overlayFontSize: typeof data.overlayFontSize === 'number' ? data.overlayFontSize : prev.overlayFontSize,
+          overlayColor: data.overlayColor || prev.overlayColor,
+          overlayLabelColor: data.overlayLabelColor || prev.overlayLabelColor,
+          overlayLabelFontSize: typeof data.overlayLabelFontSize === 'number' ? data.overlayLabelFontSize : prev.overlayLabelFontSize,
+          overlayShowLabel: typeof data.overlayShowLabel === 'boolean' ? data.overlayShowLabel : prev.overlayShowLabel,
+          overlayShowSessionCount: typeof data.overlayShowSessionCount === 'boolean' ? data.overlayShowSessionCount : prev.overlayShowSessionCount,
+          overlayFontFamily: data.overlayFontFamily || prev.overlayFontFamily,
+        };
+
+        // Only update if something changed
+        if (JSON.stringify(nextState) === JSON.stringify(prev)) {
+          return prev;
+        }
+
+        return nextState;
+      });
     });
 
     return () => {

@@ -1,8 +1,9 @@
 const CHANNEL_NAME = 'camo_pomodoro_sync';
-const LIVE_STATE_KEY = 'ubst_pomo_live_state_v1';
 
 export const syncChannel = {
   channel: null,
+  eventSource: null,
+  pollInterval: null,
   lastTimestamp: 0,
 
   init() {
@@ -21,25 +22,35 @@ export const syncChannel = {
   postState(state) {
     this.init();
     
-    const payload = {
+    // Always include timestamp
+    const stateWithTimestamp = {
       ...state,
       timestamp: Date.now()
     };
 
-    // 1. Broadcast to same-browser windows via BroadcastChannel
+    // 1. Broadcast via BroadcastChannel (same browser tabs)
     if (this.channel) {
       try {
-        this.channel.postMessage(payload);
+        this.channel.postMessage(stateWithTimestamp);
       } catch (err) {
         console.warn('BroadcastChannel postMessage failed:', err);
       }
     }
 
-    // 2. Persist complete unified state payload to localStorage for instant cross-window sync
-    if (typeof localStorage !== 'undefined') {
+    // 2. Broadcast via HTTP API endpoint (cross-browser / Camo Web Capture process)
+    if (typeof fetch !== 'undefined') {
       try {
-        localStorage.setItem(LIVE_STATE_KEY, JSON.stringify(payload));
-      } catch (err) {}
+        fetch('/api/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(stateWithTimestamp),
+          credentials: 'omit'
+        }).catch((err) => {
+          console.debug('Sync POST failed:', err.message);
+        });
+      } catch (e) {
+        console.debug('Sync fetch error:', e);
+      }
     }
   },
 
@@ -47,12 +58,18 @@ export const syncChannel = {
     this.init();
     this.lastTimestamp = 0;
 
+    const handlers = {
+      broadcast: null,
+      storage: null,
+      close: null
+    };
+
     const processData = (data) => {
       if (!data || typeof data !== 'object') return false;
       
       const dataTimestamp = data.timestamp || 0;
       
-      // Strict timestamp ordering: ignore older or duplicate state payloads
+      // Ignore older or duplicate messages
       if (dataTimestamp < this.lastTimestamp) {
         return false;
       }
@@ -67,56 +84,115 @@ export const syncChannel = {
         return false;
       }
     };
-
-    // 1. Initial State Load from localStorage
-    if (typeof localStorage !== 'undefined') {
-      try {
-        const initialSaved = localStorage.getItem(LIVE_STATE_KEY);
-        if (initialSaved) {
-          processData(JSON.parse(initialSaved));
-        }
-      } catch (e) {}
-    }
-
-    // 2. Listen via BroadcastChannel
-    const broadcastHandler = (event) => {
-      if (event && event.data) {
-        processData(event.data);
-      }
-    };
-
+    
+    // 1. Listen via BroadcastChannel (primary for same-window sync)
     if (this.channel) {
+      handlers.broadcast = (event) => {
+        if (event && event.data) {
+          processData(event.data);
+        }
+      };
       try {
-        this.channel.addEventListener('message', broadcastHandler);
-      } catch (err) {}
+        this.channel.addEventListener('message', handlers.broadcast);
+      } catch (err) {
+        console.warn('BroadcastChannel addEventListener failed:', err);
+      }
     }
 
-    // 3. Listen via Window Storage Events (instant cross-window fallback)
-    const storageHandler = (e) => {
-      if (e.key === LIVE_STATE_KEY && e.newValue) {
+    // 2. Listen via Server-Sent Events (SSE) for Camo Studio / external web capture
+    if (typeof EventSource !== 'undefined') {
+      try {
+        this.eventSource = new EventSource('/api/stream');
+        
+        this.eventSource.onmessage = (event) => {
+          if (event && event.data) {
+            try {
+              const data = JSON.parse(event.data);
+              processData(data);
+            } catch (e) {
+              console.debug('Failed to parse SSE data:', e);
+            }
+          }
+        };
+
+        this.eventSource.onerror = (err) => {
+          console.debug('SSE connection error:', err);
+          // EventSource will attempt to reconnect automatically
+        };
+      } catch (e) {
+        console.debug('EventSource creation failed:', e);
+      }
+    }
+
+    // 3. Listen via window storage event (fallback)
+    handlers.storage = (e) => {
+      if (e.key === 'ubst_pomo_run_state_v1' && e.newValue) {
         try {
-          processData(JSON.parse(e.newValue));
-        } catch (err) {}
+          const data = JSON.parse(e.newValue);
+          processData(data);
+        } catch (err) {
+          console.debug('Storage event parse error:', err);
+        }
       }
     };
 
     if (typeof window !== 'undefined') {
       try {
-        window.addEventListener('storage', storageHandler);
-      } catch (err) {}
+        window.addEventListener('storage', handlers.storage);
+      } catch (err) {
+        console.warn('Storage event listener failed:', err);
+      }
     }
 
-    // Cleanup subscription
+    // 4. Fallback HTTP Poll every 1000ms if other methods fail
+    this.pollInterval = setInterval(() => {
+      if (typeof fetch !== 'undefined') {
+        fetch('/api/sync', {
+          credentials: 'omit'
+        })
+          .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+          })
+          .then(data => {
+            if (data && typeof data === 'object') {
+              processData(data);
+            }
+          })
+          .catch((err) => {
+            console.debug('Poll fetch error:', err.message);
+          });
+      }
+    }, 1000);
+
+    // Return cleanup function
     return () => {
-      if (this.channel) {
+      // Remove BroadcastChannel listener
+      if (this.channel && handlers.broadcast) {
         try {
-          this.channel.removeEventListener('message', broadcastHandler);
+          this.channel.removeEventListener('message', handlers.broadcast);
         } catch (err) {}
       }
-      if (typeof window !== 'undefined') {
+
+      // Close EventSource
+      if (this.eventSource) {
         try {
-          window.removeEventListener('storage', storageHandler);
+          this.eventSource.close();
+          this.eventSource = null;
         } catch (err) {}
+      }
+
+      // Remove storage listener
+      if (typeof window !== 'undefined' && handlers.storage) {
+        try {
+          window.removeEventListener('storage', handlers.storage);
+        } catch (err) {}
+      }
+
+      // Clear poll interval
+      if (this.pollInterval) {
+        clearInterval(this.pollInterval);
+        this.pollInterval = null;
       }
     };
   }
