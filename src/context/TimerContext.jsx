@@ -239,7 +239,7 @@ export function TimerProvider({ children }) {
   // Auto resume timer on refresh if it was running
   useEffect(() => {
     if (initialRunState.status === 'running') {
-      startTimer();
+      startTimer(true);
     }
   }, []);
 
@@ -359,12 +359,14 @@ export function TimerProvider({ children }) {
   };
 
   // Timer Tick Mechanism (Unthrottled Web Worker Ticker + fallback)
-  const startTimer = () => {
+  const startTimer = (forceStart = false) => {
     audioEngine.initContext();
-    if (status === 'running') return;
+    if (status === 'running' && !forceStart) return;
 
     setStatus('running');
-    endTimeRef.current = Date.now() + timeLeft * 1000;
+    if (!endTimeRef.current || !forceStart) {
+      endTimeRef.current = Date.now() + timeLeft * 1000;
+    }
 
     stopTicker();
 
