@@ -161,6 +161,7 @@ export function TimerProvider({ children }) {
     const sessionInfo = getSessionProgressInfo();
     const payload = {
       timeLeft: overrideTimeLeft,
+      targetEndTime: overrideStatus === 'running' ? endTimeRef.current : null,
       status: overrideStatus,
       sessionName: currentStep ? currentStep.name : 'STUDY',
       sessionType: currentStep ? currentStep.type : 'study',
@@ -177,6 +178,27 @@ export function TimerProvider({ children }) {
     };
     syncChannel.postState(payload);
   };
+
+  // Sync state when tab visibility changes or comes back to focus
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && status === 'running' && endTimeRef.current) {
+        const now = Date.now();
+        const remainingMs = Math.max(0, endTimeRef.current - now);
+        const remainingSec = Math.ceil(remainingMs / 1000);
+        setTimeLeft(remainingSec);
+        if (remainingSec <= 0) {
+          handleSessionComplete();
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleVisibilityChange);
+    };
+  }, [status]);
 
   // Broadcast state updates
   useEffect(() => {

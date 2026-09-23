@@ -16,6 +16,8 @@ export function OverlayView() {
     // Attempt load initial stored values
     let defaults = {
       timeLeft: 50 * 60,
+      targetEndTime: null,
+      status: 'idle',
       sessionName: 'STUDY',
       sessionType: 'study',
       sessionProgressText: 'Session 1 / 4',
@@ -57,12 +59,34 @@ export function OverlayView() {
     };
   }, []);
 
+  // Autonomous local ticker for Camo Studio view when status === 'running'
+  useEffect(() => {
+    if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const remainingMs = Math.max(0, overlayState.targetEndTime - now);
+      const remainingSec = Math.ceil(remainingMs / 1000);
+
+      setOverlayState((prev) => {
+        if (prev.timeLeft === remainingSec) return prev;
+        return { ...prev, timeLeft: remainingSec };
+      });
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, [overlayState.status, overlayState.targetEndTime]);
+
   // Listen for real-time broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
       setOverlayState((prev) => ({
         ...prev,
         timeLeft: data.timeLeft !== undefined ? data.timeLeft : prev.timeLeft,
+        targetEndTime: data.targetEndTime !== undefined ? data.targetEndTime : prev.targetEndTime,
+        status: data.status || prev.status,
         sessionName: data.sessionName || prev.sessionName,
         sessionType: data.sessionType || prev.sessionType,
         sessionProgressText: data.sessionProgressText || prev.sessionProgressText,
