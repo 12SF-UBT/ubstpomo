@@ -59,26 +59,6 @@ export function OverlayView() {
     };
   }, []);
 
-  // Autonomous local ticker for Camo Studio view when status === 'running'
-  useEffect(() => {
-    if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const remainingMs = Math.max(0, overlayState.targetEndTime - now);
-      const remainingSec = Math.ceil(remainingMs / 1000);
-
-      setOverlayState((prev) => {
-        if (prev.timeLeft === remainingSec) return prev;
-        return { ...prev, timeLeft: remainingSec };
-      });
-    }, 200);
-
-    return () => clearInterval(interval);
-  }, [overlayState.status, overlayState.targetEndTime]);
-
   // Listen for real-time broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {

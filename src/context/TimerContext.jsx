@@ -2,6 +2,33 @@ import React, { createContext, useContext, useState, useEffect, useRef } from 'r
 import { audioEngine } from '../utils/audioEngine';
 import { syncChannel } from '../utils/syncChannel';
 
+// Professional Unthrottled Web Worker Ticker Engine
+// Prevents background tab throttling by Chrome/browsers
+const createTimerWorker = () => {
+  if (typeof window === 'undefined' || !window.Worker) return null;
+  try {
+    const code = `
+      let intervalId = null;
+      self.onmessage = function(e) {
+        if (e.data.command === 'start') {
+          if (intervalId) clearInterval(intervalId);
+          intervalId = setInterval(function() {
+            self.postMessage('tick');
+          }, e.data.interval || 250);
+        } else if (e.data.command === 'stop') {
+          if (intervalId) clearInterval(intervalId);
+          intervalId = null;
+        }
+      };
+    `;
+    const blob = new Blob([code], { type: 'application/javascript' });
+    return new Worker(URL.createObjectURL(blob));
+  } catch (err) {
+    console.warn('Web Worker fallback to setInterval', err);
+    return null;
+  }
+};
+
 const STORAGE_KEY = 'ubst_pomo_settings_v1';
 
 const DEFAULT_SETTINGS = {
@@ -228,7 +255,50 @@ export function TimerProvider({ children }) {
     }
   }, [currentStepIndex, settings.modeType, settings.studyDuration, settings.shortBreakDuration, settings.longBreakDuration, settings.customSequence]);
 
-  // Timer Tick Mechanism (Drift-free Date.now() delta)
+  // Timer Worker Ref
+  const workerRef = useRef(null);
+
+  // Initialize Web Worker instance
+  useEffect(() => {
+    const worker = createTimerWorker();
+    if (worker) {
+      worker.onmessage = () => {
+        if (!endTimeRef.current) return;
+        const now = Date.now();
+        const remainingMs = Math.max(0, endTimeRef.current - now);
+        const remainingSec = Math.ceil(remainingMs / 1000);
+
+        setTimeLeft(remainingSec);
+        broadcastCurrentState(remainingSec, 'running');
+
+        if (remainingSec <= 0) {
+          stopTicker();
+          handleSessionComplete();
+        }
+      };
+      workerRef.current = worker;
+    }
+
+    return () => {
+      if (workerRef.current) {
+        workerRef.current.postMessage({ command: 'stop' });
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+    };
+  }, []);
+
+  const stopTicker = () => {
+    if (workerRef.current) {
+      workerRef.current.postMessage({ command: 'stop' });
+    }
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  // Timer Tick Mechanism (Unthrottled Web Worker Ticker + fallback)
   const startTimer = () => {
     audioEngine.initContext();
     if (status === 'running') return;
@@ -236,24 +306,29 @@ export function TimerProvider({ children }) {
     setStatus('running');
     endTimeRef.current = Date.now() + timeLeft * 1000;
 
-    clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => {
-      const now = Date.now();
-      const remainingMs = Math.max(0, endTimeRef.current - now);
-      const remainingSec = Math.ceil(remainingMs / 1000);
+    stopTicker();
 
-      setTimeLeft(remainingSec);
-      broadcastCurrentState(remainingSec, 'running');
+    if (workerRef.current) {
+      workerRef.current.postMessage({ command: 'start', interval: 250 });
+    } else {
+      timerRef.current = setInterval(() => {
+        const now = Date.now();
+        const remainingMs = Math.max(0, endTimeRef.current - now);
+        const remainingSec = Math.ceil(remainingMs / 1000);
 
-      if (remainingSec <= 0) {
-        clearInterval(timerRef.current);
-        handleSessionComplete();
-      }
-    }, 250);
+        setTimeLeft(remainingSec);
+        broadcastCurrentState(remainingSec, 'running');
+
+        if (remainingSec <= 0) {
+          stopTicker();
+          handleSessionComplete();
+        }
+      }, 250);
+    }
   };
 
   const pauseTimer = () => {
-    clearInterval(timerRef.current);
+    stopTicker();
     setStatus('paused');
     broadcastCurrentState(timeLeft, 'paused');
   };
@@ -263,7 +338,7 @@ export function TimerProvider({ children }) {
   };
 
   const resetTimer = () => {
-    clearInterval(timerRef.current);
+    stopTicker();
     setStatus('idle');
     const step = sequence[currentStepIndex] || sequence[0];
     const initialSeconds = step ? step.duration * 60 : 50 * 60;
@@ -272,7 +347,7 @@ export function TimerProvider({ children }) {
   };
 
   const skipSession = () => {
-    clearInterval(timerRef.current);
+    stopTicker();
     advanceToNextSession();
   };
 
