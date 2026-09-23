@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { syncChannel } from '../utils/syncChannel';
 
-const STORAGE_KEY = 'ubst_pomo_settings_v1';
+const SETTINGS_KEY = 'ubst_pomo_settings_v1';
+const LIVE_STATE_KEY = 'ubst_pomo_live_state_v1';
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -13,7 +14,6 @@ function formatTime(seconds) {
 
 export function OverlayView() {
   const [overlayState, setOverlayState] = useState(() => {
-    // Attempt load initial stored values
     let defaults = {
       timeLeft: 50 * 60,
       targetEndTime: null,
@@ -31,25 +31,47 @@ export function OverlayView() {
     };
 
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        defaults.overlayFontSize = parsed.overlayFontSize || 140;
-        defaults.overlayColor = parsed.overlayColor || '#ffffff';
-        defaults.overlayLabelColor = parsed.overlayLabelColor || '#fef08a';
-        defaults.overlayLabelFontSize = parsed.overlayLabelFontSize || 36;
-        defaults.overlayShowLabel = parsed.overlayShowLabel !== false;
-        defaults.overlayShowSessionCount = parsed.overlayShowSessionCount !== false;
-        defaults.overlayFontFamily = parsed.overlayFontFamily || 'mono';
-        defaults.timeLeft = (parsed.studyDuration || 50) * 60;
+      const liveSaved = localStorage.getItem(LIVE_STATE_KEY);
+      if (liveSaved) {
+        const parsedLive = JSON.parse(liveSaved);
+        defaults = { ...defaults, ...parsedLive };
+        if (parsedLive.status === 'running' && parsedLive.targetEndTime) {
+          const remSec = Math.max(0, Math.ceil((parsedLive.targetEndTime - Date.now()) / 1000));
+          defaults.timeLeft = remSec;
+        }
+      } else {
+        const savedSettings = localStorage.getItem(SETTINGS_KEY);
+        if (savedSettings) {
+          const parsed = JSON.parse(savedSettings);
+          defaults.overlayFontSize = parsed.overlayFontSize || defaults.overlayFontSize;
+          defaults.overlayColor = parsed.overlayColor || defaults.overlayColor;
+          defaults.overlayLabelColor = parsed.overlayLabelColor || defaults.overlayLabelColor;
+          defaults.overlayLabelFontSize = parsed.overlayLabelFontSize || defaults.overlayLabelFontSize;
+          defaults.overlayShowLabel = parsed.overlayShowLabel !== false;
+          defaults.overlayShowSessionCount = parsed.overlayShowSessionCount !== false;
+          defaults.overlayFontFamily = parsed.overlayFontFamily || defaults.overlayFontFamily;
+          defaults.timeLeft = (parsed.studyDuration || 50) * 60;
+        }
       }
     } catch (e) {}
 
     return defaults;
   });
 
-  // Ensure body and html background are transparent
+  // Transparent background styling
   useEffect(() => {
+    const styleOverlay = () => {
+      document.documentElement.style.background = 'transparent';
+      document.documentElement.style.backgroundColor = 'transparent';
+      document.body.style.background = 'transparent';
+      document.body.style.backgroundColor = 'transparent';
+      document.body.style.margin = '0';
+      document.body.style.padding = '0';
+      document.body.style.overflow = 'hidden';
+    };
+
+    styleOverlay();
+
     document.documentElement.classList.add('overlay-body');
     document.body.classList.add('overlay-body');
 
@@ -59,16 +81,17 @@ export function OverlayView() {
     };
   }, []);
 
-  // Unthrottled target-time countdown ticker inside Camo Studio
-  // Continues ticking every frame even if the main website window is minimized
+  // Smooth target-time countdown ticker inside Camo Studio
   useEffect(() => {
     if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
       return;
     }
 
     const updateDisplayTime = () => {
-      const remainingMs = Math.max(0, overlayState.targetEndTime - Date.now());
+      const now = Date.now();
+      const remainingMs = Math.max(0, overlayState.targetEndTime - now);
       const remainingSec = Math.ceil(remainingMs / 1000);
+      
       setOverlayState((prev) => {
         if (prev.timeLeft === remainingSec) return prev;
         return { ...prev, timeLeft: remainingSec };
@@ -77,13 +100,15 @@ export function OverlayView() {
 
     updateDisplayTime();
     const interval = setInterval(updateDisplayTime, 250);
+
     return () => clearInterval(interval);
   }, [overlayState.status, overlayState.targetEndTime]);
 
-  // Listen for real-time broadcasts from main timer window
+  // Subscribe to real-time state broadcasts
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
       if (!data || typeof data !== 'object') return;
+
       setOverlayState((prev) => ({
         ...prev,
         timeLeft: typeof data.timeLeft === 'number' ? data.timeLeft : prev.timeLeft,
@@ -102,18 +127,32 @@ export function OverlayView() {
       }));
     });
 
-    return unsubscribe;
+    return () => {
+      if (unsubscribe && typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const formattedTime = formatTime(overlayState.timeLeft);
 
-  // Clean session count string, e.g., "Session 2/4" or "Session 2 / 4"
   const cleanSessionCount = (overlayState.sessionProgressText || '')
     .replace(' / ', '/')
     .replace('Break after ', 'Break ');
 
   return (
-    <div className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4">
+    <div 
+      className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4"
+      style={{
+        backgroundColor: 'transparent',
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        zIndex: 9999,
+      }}
+    >
       {/* Large Timer Digits */}
       <div
         className={`font-bold tracking-tight leading-none transition-all duration-150 ${
@@ -122,20 +161,30 @@ export function OverlayView() {
         style={{
           fontSize: `${overlayState.overlayFontSize}px`,
           color: overlayState.overlayColor,
-          textShadow: '0 4px 16px rgba(0,0,0,0.95), 0 2px 4px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.5)',
+          textShadow: [
+            '0 4px 16px rgba(0,0,0,0.95)',
+            '0 2px 4px rgba(0,0,0,0.8)',
+            '0 0 20px rgba(0,0,0,0.5)'
+          ].join(','),
+          textAlign: 'center',
+          whiteSpace: 'nowrap',
         }}
       >
         {formattedTime}
       </div>
 
-      {/* Session Label & Automatic Counter Display */}
+      {/* Session Label & Progress Counter */}
       {(overlayState.overlayShowLabel || overlayState.overlayShowSessionCount) && (
         <div
-          className="font-medium tracking-normal mt-2 transition-all duration-150 text-center flex items-center justify-center gap-2"
+          className="font-medium tracking-normal mt-2 transition-all duration-150 text-center flex items-center justify-center gap-2 flex-wrap"
           style={{
             fontSize: `${overlayState.overlayLabelFontSize}px`,
             color: overlayState.overlayLabelColor || '#fef08a',
-            textShadow: '0 3px 10px rgba(0,0,0,0.95), 0 1px 3px rgba(0,0,0,0.9), 0 0 12px rgba(0,0,0,0.7)',
+            textShadow: [
+              '0 3px 10px rgba(0,0,0,0.95)',
+              '0 1px 3px rgba(0,0,0,0.9)',
+              '0 0 12px rgba(0,0,0,0.7)'
+            ].join(','),
             fontFamily: 'Georgia, Cambria, "Times New Roman", Times, serif',
           }}
         >

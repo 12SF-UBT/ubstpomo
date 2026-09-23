@@ -1,12 +1,19 @@
 const CHANNEL_NAME = 'camo_pomodoro_sync';
+const LIVE_STATE_KEY = 'ubst_pomo_live_state_v1';
 
 export const syncChannel = {
   channel: null,
+  lastTimestamp: 0,
 
   init() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       if (!this.channel) {
-        this.channel = new BroadcastChannel(CHANNEL_NAME);
+        try {
+          this.channel = new BroadcastChannel(CHANNEL_NAME);
+        } catch (err) {
+          console.warn('BroadcastChannel not available:', err);
+          this.channel = null;
+        }
       }
     }
   },
@@ -14,106 +21,103 @@ export const syncChannel = {
   postState(state) {
     this.init();
     
-    // Broadcast via BroadcastChannel (same browser tabs)
+    const payload = {
+      ...state,
+      timestamp: Date.now()
+    };
+
+    // 1. Broadcast to same-browser windows via BroadcastChannel
     if (this.channel) {
       try {
-        this.channel.postMessage(state);
+        this.channel.postMessage(payload);
       } catch (err) {
         console.warn('BroadcastChannel postMessage failed:', err);
       }
     }
 
-    // Broadcast via HTTP API endpoint (cross-browser / Camo Web Capture process)
-    if (typeof fetch !== 'undefined') {
+    // 2. Persist complete unified state payload to localStorage for instant cross-window sync
+    if (typeof localStorage !== 'undefined') {
       try {
-        fetch('/api/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(state)
-        }).catch(() => {});
-      } catch (e) {}
+        localStorage.setItem(LIVE_STATE_KEY, JSON.stringify(payload));
+      } catch (err) {}
     }
   },
 
   subscribe(callback) {
     this.init();
-    let lastTimestamp = 0;
+    this.lastTimestamp = 0;
 
     const processData = (data) => {
-      if (data && typeof data === 'object' && data.timestamp) {
-        if (data.timestamp >= lastTimestamp) {
-          lastTimestamp = data.timestamp;
-          callback(data);
-        }
+      if (!data || typeof data !== 'object') return false;
+      
+      const dataTimestamp = data.timestamp || 0;
+      
+      // Strict timestamp ordering: ignore older or duplicate state payloads
+      if (dataTimestamp < this.lastTimestamp) {
+        return false;
+      }
+      
+      this.lastTimestamp = dataTimestamp;
+      
+      try {
+        callback(data);
+        return true;
+      } catch (err) {
+        console.error('Error in sync callback:', err);
+        return false;
       }
     };
-    
-    // 1. Listen via BroadcastChannel
-    const handler = (event) => {
+
+    // 1. Initial State Load from localStorage
+    if (typeof localStorage !== 'undefined') {
+      try {
+        const initialSaved = localStorage.getItem(LIVE_STATE_KEY);
+        if (initialSaved) {
+          processData(JSON.parse(initialSaved));
+        }
+      } catch (e) {}
+    }
+
+    // 2. Listen via BroadcastChannel
+    const broadcastHandler = (event) => {
       if (event && event.data) {
         processData(event.data);
       }
     };
 
     if (this.channel) {
-      this.channel.addEventListener('message', handler);
-    }
-
-    // 2. Listen via Server-Sent Events (SSE) for Camo Studio / external web capture
-    let eventSource = null;
-    if (typeof EventSource !== 'undefined') {
       try {
-        eventSource = new EventSource('/api/stream');
-        eventSource.onmessage = (event) => {
-          if (event && event.data) {
-            try {
-              const data = JSON.parse(event.data);
-              processData(data);
-            } catch (e) {}
-          }
-        };
-      } catch (e) {}
+        this.channel.addEventListener('message', broadcastHandler);
+      } catch (err) {}
     }
 
-    // 3. Listen via window storage event (cross-window fallback when Chrome throttles background fetch)
+    // 3. Listen via Window Storage Events (instant cross-window fallback)
     const storageHandler = (e) => {
-      if (e.key === 'ubst_pomo_run_state_v1' && e.newValue) {
+      if (e.key === LIVE_STATE_KEY && e.newValue) {
         try {
-          const data = JSON.parse(e.newValue);
-          processData(data);
+          processData(JSON.parse(e.newValue));
         } catch (err) {}
       }
     };
+
     if (typeof window !== 'undefined') {
-      window.addEventListener('storage', storageHandler);
+      try {
+        window.addEventListener('storage', storageHandler);
+      } catch (err) {}
     }
 
-    // 4. Fallback HTTP Poll every 500ms if SSE or BroadcastChannel are disconnected
-    const pollInterval = setInterval(() => {
-      if (typeof fetch !== 'undefined') {
-        fetch('/api/sync')
-          .then(res => res.json())
-          .then(data => {
-            if (data && data.timestamp) {
-              processData(data);
-            }
-          })
-          .catch(() => {});
-      }
-    }, 500);
-
+    // Cleanup subscription
     return () => {
       if (this.channel) {
-        this.channel.removeEventListener('message', handler);
-      }
-      if (eventSource) {
-        eventSource.close();
+        try {
+          this.channel.removeEventListener('message', broadcastHandler);
+        } catch (err) {}
       }
       if (typeof window !== 'undefined') {
-        window.removeEventListener('storage', storageHandler);
+        try {
+          window.removeEventListener('storage', storageHandler);
+        } catch (err) {}
       }
-      clearInterval(pollInterval);
     };
   }
 };
-

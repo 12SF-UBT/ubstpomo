@@ -1,234 +1,208 @@
-// Web Audio API Procedural Audio Engine for Ambient Noise and Alarm Chimes
-// No external dependencies, 100% offline reliable sound generator
+/**
+ * Audio Engine for Pomodoro Timer
+ * Handles ambient sounds, session chimes, volume control, and Web Audio API setup
+ */
 
-class AudioEngine {
-  constructor() {
-    this.ctx = null;
-    this.ambientGain = null;
-    this.masterGain = null;
-    this.ambientSourceNode = null;
-    this.ambientFilterNode = null;
-    this.currentSoundType = null; // 'rain', 'waves', 'drone', 'off'
-    this.isPlayingAmbient = false;
-    this.volume = 0.5;
-    this.isMuted = false;
-  }
-
+export const audioEngine = {
+  context: null,
+  gainNode: null,
+  oscillator: null,
+  ambientSource: null,
+  ambientGain: null,
+  isMuted: false,
+  volume: 0.6,
+  
+  /**
+   * Initialize Web Audio Context (must be called on user interaction)
+   */
   initContext() {
-    if (!this.ctx) {
-      const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (AudioCtx) {
-        this.ctx = new AudioCtx();
-        this.masterGain = this.ctx.createGain();
-        this.ambientGain = this.ctx.createGain();
-        
-        this.updateMasterVolume();
-        this.ambientGain.connect(this.masterGain);
-        this.masterGain.connect(this.ctx.destination);
+    if (this.context) return;
+    
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (AudioContext) {
+        this.context = new AudioContext();
+        this.gainNode = this.context.createGain();
+        this.gainNode.connect(this.context.destination);
+        this.gainNode.gain.value = this.isMuted ? 0 : this.volume;
+        console.log('Web Audio Context initialized');
       }
+    } catch (err) {
+      console.warn('Web Audio API not supported:', err);
     }
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume();
+  },
+
+  /**
+   * Resume audio context if suspended (required by browser autoplay policy)
+   */
+  resumeContext() {
+    if (this.context && this.context.state === 'suspended') {
+      this.context.resume().catch(err => {
+        console.debug('Could not resume audio context:', err);
+      });
     }
-  }
+  },
 
-  updateMasterVolume() {
-    if (!this.masterGain) return;
-    const effectiveVol = this.isMuted ? 0 : this.volume;
-    this.masterGain.gain.setTargetAtTime(effectiveVol, this.ctx ? this.ctx.currentTime : 0, 0.05);
-  }
-
+  /**
+   * Set master volume (0.0 to 1.0)
+   */
   setVolume(vol) {
     this.volume = Math.max(0, Math.min(1, vol));
-    this.updateMasterVolume();
-  }
+    if (this.gainNode) {
+      this.gainNode.gain.value = this.isMuted ? 0 : this.volume;
+    }
+  },
 
+  /**
+   * Mute/unmute audio
+   */
   setMuted(muted) {
     this.isMuted = muted;
-    this.updateMasterVolume();
-  }
-
-  stopAmbientNode() {
-    if (this.ambientSourceNode) {
-      try {
-        this.ambientSourceNode.stop();
-        this.ambientSourceNode.disconnect();
-      } catch (e) {}
-      this.ambientSourceNode = null;
+    if (this.gainNode) {
+      this.gainNode.gain.value = muted ? 0 : this.volume;
     }
-    if (this.ambientFilterNode) {
-      try {
-        this.ambientFilterNode.disconnect();
-      } catch (e) {}
-      this.ambientFilterNode = null;
-    }
-  }
+  },
 
-  // Generate buffer for Pink / Brown / White noise
-  createNoiseBuffer(type = 'brown') {
-    if (!this.ctx) return null;
-    const bufferSize = 5 * this.ctx.sampleRate;
-    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    const output = buffer.getChannelData(0);
-
-    let lastOut = 0.0;
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-
-    for (let i = 0; i < bufferSize; i++) {
-      const white = Math.random() * 2 - 1;
-
-      if (type === 'brown' || type === 'rain') {
-        // Brown noise approximation for rain
-        output[i] = (lastOut + (0.02 * white)) / 1.02;
-        lastOut = output[i];
-        output[i] *= 3.5; // boost volume
-      } else if (type === 'waves' || type === 'pink') {
-        // Pink noise approximation
-        b0 = 0.99886 * b0 + white * 0.0555179;
-        b1 = 0.99332 * b1 + white * 0.0750759;
-        b2 = 0.96900 * b2 + white * 0.1538520;
-        b3 = 0.86650 * b3 + white * 0.3104856;
-        b4 = 0.55000 * b4 + white * 0.5329522;
-        b5 = -0.7616 * b5 - white * 0.0168980;
-        output[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
-        output[i] *= 0.11;
-        b6 = white * 0.115926;
-      } else {
-        output[i] = white * 0.1;
-      }
-    }
-    return buffer;
-  }
-
-  startAmbient(soundType) {
+  /**
+   * Start ambient background sound loop
+   * soundName: 'rain', 'waves', 'fire', 'forest', 'coffee'
+   */
+  startAmbient(soundName) {
     this.initContext();
-    if (!this.ctx) return;
+    this.resumeContext();
+    
+    if (!this.context) return;
 
-    if (soundType === 'off' || !soundType) {
-      this.stopAmbient();
-      return;
-    }
+    // Stop any existing ambient
+    this.stopAmbient();
 
-    // If same sound type is already running, keep it
-    if (this.currentSoundType === soundType && this.isPlayingAmbient) {
-      return;
-    }
+    try {
+      // For demo: create a simple tone loop instead of loading files
+      // In production, load actual audio files
+      const freq = this.getAmbientFrequency(soundName);
+      const osc = this.context.createOscillator();
+      const filter = this.context.createBiquadFilter();
+      const lfo = this.context.createOscillator();
+      const lfoGain = this.context.createGain();
 
-    this.stopAmbientNode();
-    this.currentSoundType = soundType;
-    this.isPlayingAmbient = true;
+      // Create ambient gain for separate control
+      this.ambientGain = this.context.createGain();
+      this.ambientGain.gain.value = this.volume * 0.3; // Quieter ambient
 
-    if (soundType === 'rain') {
-      const buffer = this.createNoiseBuffer('rain');
-      const noise = this.ctx.createBufferSource();
-      noise.buffer = buffer;
-      noise.loop = true;
-
-      // Low pass filter for soft rain feel
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(1000, this.ctx.currentTime);
-
-      noise.connect(filter);
-      filter.connect(this.ambientGain);
-      noise.start();
-
-      this.ambientSourceNode = noise;
-      this.ambientFilterNode = filter;
-    } else if (soundType === 'waves') {
-      const buffer = this.createNoiseBuffer('pink');
-      const noise = this.ctx.createBufferSource();
-      noise.buffer = buffer;
-      noise.loop = true;
-
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(400, this.ctx.currentTime);
-      filter.Q.setValueAtTime(1.0, this.ctx.currentTime);
-
-      // LFO to simulate wave swell
-      const lfo = this.ctx.createOscillator();
-      lfo.frequency.setValueAtTime(0.12, this.ctx.currentTime); // ~8 sec wave swell cycle
-      const lfoGain = this.ctx.createGain();
-      lfoGain.gain.setValueAtTime(300, this.ctx.currentTime);
+      // LFO modulation for organic feel
+      lfo.frequency.value = 0.5;
+      lfoGain.gain.value = 50;
       lfo.connect(lfoGain);
-      lfoGain.connect(filter.frequency);
+      lfoGain.connect(osc.frequency);
+
+      // Filter for warmth
+      filter.type = 'lowpass';
+      filter.frequency.value = 300;
+      filter.Q.value = 1;
+
+      // Connect chain: osc -> filter -> gain -> destination
+      osc.connect(filter);
+      filter.connect(this.ambientGain);
+      this.ambientGain.connect(this.gainNode);
+
+      // Start oscillators
+      osc.start();
       lfo.start();
 
-      noise.connect(filter);
-      filter.connect(this.ambientGain);
-      noise.start();
-
-      this.ambientSourceNode = noise;
-      this.ambientFilterNode = filter;
-    } else if (soundType === 'drone') {
-      // Warm synth chord drone
-      const osc1 = this.ctx.createOscillator();
-      const osc2 = this.ctx.createOscillator();
-      osc1.type = 'sine';
-      osc2.type = 'triangle';
-      osc1.frequency.setValueAtTime(110, this.ctx.currentTime); // A2
-      osc2.frequency.setValueAtTime(164.81, this.ctx.currentTime); // E3
-
-      const filter = this.ctx.createBiquadFilter();
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(350, this.ctx.currentTime);
-
-      osc1.connect(filter);
-      osc2.connect(filter);
-      filter.connect(this.ambientGain);
-
-      osc1.start();
-      osc2.start();
-
-      this.ambientSourceNode = {
-        stop: () => {
-          osc1.stop();
-          osc2.stop();
-        },
-        disconnect: () => {
-          osc1.disconnect();
-          osc2.disconnect();
-        }
-      };
-      this.ambientFilterNode = filter;
+      this.ambientSource = { osc, lfo, filter };
+      console.log(`Ambient sound started: ${soundName}`);
+    } catch (err) {
+      console.warn('Failed to start ambient sound:', err);
     }
-  }
+  },
 
+  /**
+   * Stop ambient sound
+   */
   stopAmbient() {
-    this.stopAmbientNode();
-    this.isPlayingAmbient = false;
-    this.currentSoundType = 'off';
-  }
+    if (this.ambientSource) {
+      try {
+        this.ambientSource.osc.stop();
+        this.ambientSource.lfo.stop();
+      } catch (err) {}
+      this.ambientSource = null;
+    }
+    if (this.ambientGain) {
+      this.ambientGain.gain.value = 0;
+    }
+  },
 
-  // Play session finish bell/chime
+  /**
+   * Play session completion chime
+   */
   playSessionChime() {
     this.initContext();
-    if (!this.ctx || this.isMuted) return;
-
-    const now = this.ctx.currentTime;
+    this.resumeContext();
     
-    // Multi-frequency warm chime
-    const frequencies = [523.25, 659.25, 783.99, 1046.50]; // C5, E5, G5, C6 (C Major chord)
+    if (!this.context || this.isMuted) return;
 
-    frequencies.forEach((freq, index) => {
-      const osc = this.ctx.createOscillator();
-      const gain = this.ctx.createGain();
+    try {
+      const now = this.context.currentTime;
+      const duration = 0.5;
 
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(freq, now + index * 0.08);
+      // Create chime sound using multiple tones
+      const frequencies = [523.25, 659.25, 783.99]; // C5, E5, G5 chord
 
-      gain.gain.setValueAtTime(0.01, now);
-      gain.gain.exponentialRampToValueAtTime(0.25, now + index * 0.08 + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + index * 0.08 + 2.5);
+      frequencies.forEach((freq, idx) => {
+        const osc = this.context.createOscillator();
+        const env = this.context.createGain();
 
-      osc.connect(gain);
-      gain.connect(this.masterGain);
+        osc.frequency.value = freq;
+        osc.type = 'sine';
 
-      osc.start(now + index * 0.08);
-      osc.stop(now + index * 0.08 + 2.6);
-    });
+        // Exponential decay envelope
+        env.gain.setValueAtTime(this.volume * 0.5, now);
+        env.gain.exponentialRampToValueAtTime(0.01, now + duration);
+
+        osc.connect(env);
+        env.connect(this.gainNode);
+
+        osc.start(now + idx * 0.05);
+        osc.stop(now + duration + idx * 0.05);
+      });
+
+      console.log('Session chime played');
+    } catch (err) {
+      console.warn('Failed to play chime:', err);
+    }
+  },
+
+  /**
+   * Get ambient frequency for different sounds
+   */
+  getAmbientFrequency(soundName) {
+    const frequencies = {
+      rain: 110,      // A2 - low, calming
+      waves: 55,      // A1 - very low, oceanic
+      fire: 220,      // A3 - medium, warming
+      forest: 165,    // E3 - nature-like
+      coffee: 146,    // D3 - cozy, cafe-like
+    };
+    return frequencies[soundName] || 110;
+  },
+
+  /**
+   * Cleanup: stop all audio
+   */
+  cleanup() {
+    this.stopAmbient();
+    if (this.oscillator) {
+      try {
+        this.oscillator.stop();
+      } catch (err) {}
+      this.oscillator = null;
+    }
   }
-}
+};
 
-export const audioEngine = new AudioEngine();
+// Cleanup on page unload
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    audioEngine.cleanup();
+  });
+}

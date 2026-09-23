@@ -1,9 +1,8 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { audioEngine } from '../utils/audioEngine';
 import { syncChannel } from '../utils/syncChannel';
 
 // Professional Unthrottled Web Worker Ticker Engine
-// Prevents background tab throttling by Chrome/browsers
 const createTimerWorker = () => {
   if (typeof window === 'undefined' || !window.Worker) return null;
   try {
@@ -12,19 +11,23 @@ const createTimerWorker = () => {
       self.onmessage = function(e) {
         if (e.data.command === 'start') {
           if (intervalId) clearInterval(intervalId);
+          const interval = e.data.interval || 250;
           intervalId = setInterval(function() {
-            self.postMessage('tick');
-          }, e.data.interval || 250);
+            self.postMessage({ type: 'tick', timestamp: Date.now() });
+          }, interval);
         } else if (e.data.command === 'stop') {
-          if (intervalId) clearInterval(intervalId);
-          intervalId = null;
+          if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = null;
+          }
         }
       };
     `;
     const blob = new Blob([code], { type: 'application/javascript' });
-    return new Worker(URL.createObjectURL(blob));
+    const workerUrl = URL.createObjectURL(blob);
+    return new Worker(workerUrl);
   } catch (err) {
-    console.warn('Web Worker fallback to setInterval', err);
+    console.warn('Web Worker not available, using setInterval fallback:', err);
     return null;
   }
 };
@@ -33,14 +36,12 @@ const STORAGE_KEY = 'ubst_pomo_settings_v1';
 const RUN_STATE_KEY = 'ubst_pomo_run_state_v1';
 
 const DEFAULT_SETTINGS = {
-  modeType: 'standard', // 'standard' | 'custom'
-  // Standard mode config
-  studyDuration: 50, // in minutes
+  modeType: 'standard',
+  studyDuration: 50,
   shortBreakDuration: 10,
   longBreakDuration: 30,
   longBreakAfter: 4,
 
-  // Custom mode config
   customSequence: [
     { id: '1', name: 'Focus Phase 1', type: 'study', duration: 50 },
     { id: '2', name: 'Quick Rest', type: 'break', duration: 10 },
@@ -51,31 +52,27 @@ const DEFAULT_SETTINGS = {
     { id: '7', name: 'Final Sprint', type: 'study', duration: 60 },
   ],
 
-  // Repeat config
-  repeatMode: 'continuous', // 'continuous' | 'count' | 'none'
+  repeatMode: 'continuous',
   targetLoops: 1,
 
-  // Audio settings
-  studySound: 'rain', // 'rain' | 'waves' | 'drone' | 'off'
+  studySound: 'rain',
   breakSound: 'waves',
   volume: 0.6,
   isMuted: false,
   isAmbientEnabled: true,
 
-  // Overlay customizations
-  overlayFontSize: 140, // in px
+  overlayFontSize: 140,
   overlayColor: '#ffffff',
-  overlayLabelColor: '#fef08a', // warm yellow as in user image
-  overlayLabelFontSize: 36, // in px
+  overlayLabelColor: '#fef08a',
+  overlayLabelFontSize: 36,
   overlayShowLabel: true,
   overlayShowSessionCount: true,
-  overlayFontFamily: 'mono', // 'mono' | 'sans'
+  overlayFontFamily: 'mono',
 };
 
 const TimerContext = createContext(null);
 
 export function TimerProvider({ children }) {
-  // Load settings from localStorage
   const [settings, setSettings] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -88,65 +85,85 @@ export function TimerProvider({ children }) {
     return DEFAULT_SETTINGS;
   });
 
-  // Load active runtime state from localStorage if refreshed/reopened
-  const initialRunState = (() => {
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [currentLoopCount, setCurrentLoopCount] = useState(1);
+  const [status, setStatus] = useState('idle');
+  const [timeLeft, setTimeLeft] = useState(50 * 60);
+
+  // Use refs to track timing state without triggering re-renders
+  const endTimeRef = useRef(null);
+  const timerRef = useRef(null);
+  const workerRef = useRef(null);
+  const currentStepIndexRef = useRef(0);
+  const currentLoopCountRef = useRef(1);
+  const statusRef = useRef('idle');
+  const settingsRef = useRef(settings);
+  const timeLeftRef = useRef(50 * 60);
+
+  // Restore runtime state on mount
+  useEffect(() => {
     try {
       const saved = localStorage.getItem(RUN_STATE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
+        
         if (parsed.status === 'running' && parsed.targetEndTime) {
-          const remainingMs = parsed.targetEndTime - Date.now();
-          const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+          const remainingMs = Math.max(0, parsed.targetEndTime - Date.now());
+          const remainingSec = Math.ceil(remainingMs / 1000);
+          
           if (remainingSec > 0) {
-            return {
-              status: 'running',
-              timeLeft: remainingSec,
-              targetEndTime: parsed.targetEndTime,
-              currentStepIndex: parsed.currentStepIndex || 0,
-              currentLoopCount: parsed.currentLoopCount || 1,
-            };
+            setStatus('running');
+            setTimeLeft(remainingSec);
+            setCurrentStepIndex(parsed.currentStepIndex || 0);
+            setCurrentLoopCount(parsed.currentLoopCount || 1);
+            endTimeRef.current = parsed.targetEndTime;
+            
+            // Auto-start timer
+            timeLeftRef.current = remainingSec;
+            statusRef.current = 'running';
           }
-        } else if (parsed.status === 'paused' && typeof parsed.timeLeft === 'number') {
-          return {
-            status: 'paused',
-            timeLeft: parsed.timeLeft,
-            targetEndTime: null,
-            currentStepIndex: parsed.currentStepIndex || 0,
-            currentLoopCount: parsed.currentLoopCount || 1,
-          };
+        } else if (parsed.status === 'paused') {
+          setStatus('paused');
+          setTimeLeft(parsed.timeLeft || 50 * 60);
+          setCurrentStepIndex(parsed.currentStepIndex || 0);
+          setCurrentLoopCount(parsed.currentLoopCount || 1);
+          timeLeftRef.current = parsed.timeLeft || 50 * 60;
+          statusRef.current = 'paused';
         }
       }
-    } catch (e) {}
-    return {
-      status: 'idle',
-      timeLeft: (settings?.studyDuration || 50) * 60,
-      targetEndTime: null,
-      currentStepIndex: 0,
-      currentLoopCount: 1,
-    };
-  })();
+    } catch (e) {
+      console.warn('Failed to restore run state:', e);
+    }
+  }, []);
 
-  // Current session tracking
-  const [currentStepIndex, setCurrentStepIndex] = useState(initialRunState.currentStepIndex);
-  const [currentLoopCount, setCurrentLoopCount] = useState(initialRunState.currentLoopCount);
-  const [status, setStatus] = useState(initialRunState.status); // 'idle' | 'running' | 'paused'
-  
-  // Seconds remaining in current step
-  const [timeLeft, setTimeLeft] = useState(initialRunState.timeLeft);
+  // Keep refs in sync with state
+  useEffect(() => {
+    currentStepIndexRef.current = currentStepIndex;
+  }, [currentStepIndex]);
 
-  // Timer interval ref
-  const timerRef = useRef(null);
-  const endTimeRef = useRef(initialRunState.targetEndTime);
+  useEffect(() => {
+    currentLoopCountRef.current = currentLoopCount;
+  }, [currentLoopCount]);
 
-  // Calculate current active session sequence array based on modeType
-  const getSequence = (currentSettings = settings) => {
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    timeLeftRef.current = timeLeft;
+  }, [timeLeft]);
+
+  const getSequence = useCallback((currentSettings = settings) => {
     if (currentSettings.modeType === 'custom') {
-      return currentSettings.customSequence.length > 0
+      return currentSettings.customSequence?.length > 0
         ? currentSettings.customSequence
         : [{ id: 'def', name: 'Study', type: 'study', duration: currentSettings.studyDuration }];
     }
 
-    // Generate standard Pomodoro sequence array
     const seq = [];
     for (let i = 1; i <= currentSettings.longBreakAfter; i++) {
       seq.push({
@@ -173,13 +190,12 @@ export function TimerProvider({ children }) {
       }
     }
     return seq;
-  };
+  }, []);
 
   const sequence = getSequence(settings);
   const currentStep = sequence[currentStepIndex] || sequence[0];
 
-  // Calculate session count info for display (e.g. Session 3 / 4)
-  const getSessionProgressInfo = () => {
+  const getSessionProgressInfo = useCallback(() => {
     if (settings.modeType === 'custom') {
       const totalSteps = sequence.length;
       return {
@@ -189,18 +205,15 @@ export function TimerProvider({ children }) {
         loopText: settings.repeatMode === 'count' ? `Loop ${currentLoopCount} / ${settings.targetLoops}` : ''
       };
     } else {
-      // Standard mode
       const studySteps = sequence.filter(s => s.type === 'study');
-      let currentStudyNum = 1;
-      let totalStudyNum = studySteps.length;
-
       let count = 0;
       for (let i = 0; i <= currentStepIndex; i++) {
         if (sequence[i] && sequence[i].type === 'study') {
           count++;
         }
       }
-      currentStudyNum = Math.max(1, count);
+      const currentStudyNum = Math.max(1, count);
+      const totalStudyNum = studySteps.length;
 
       return {
         current: currentStudyNum,
@@ -211,18 +224,18 @@ export function TimerProvider({ children }) {
         loopText: settings.repeatMode === 'count' ? `Loop ${currentLoopCount} / ${settings.targetLoops}` : ''
       };
     }
-  };
+  }, [settings.modeType, settings.repeatMode, settings.targetLoops, currentStepIndex, currentLoopCount, sequence, currentStep]);
 
-  // Save settings to localStorage
+  // Persist settings to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     } catch (e) {
-      console.warn('Failed to save settings', e);
+      console.warn('Failed to save settings:', e);
     }
   }, [settings]);
 
-  // Save active runtime state to localStorage
+  // Persist runtime state to localStorage
   useEffect(() => {
     try {
       localStorage.setItem(RUN_STATE_KEY, JSON.stringify({
@@ -233,66 +246,63 @@ export function TimerProvider({ children }) {
         currentLoopCount,
         timestamp: Date.now()
       }));
-    } catch (e) {}
+    } catch (e) {
+      console.warn('Failed to save run state:', e);
+    }
   }, [status, timeLeft, currentStepIndex, currentLoopCount]);
 
-  // Auto resume timer on refresh if it was running
-  useEffect(() => {
-    if (initialRunState.status === 'running') {
-      startTimer(true);
-    }
-  }, []);
-
-  // Sync state broadcast whenever critical state changes
-  const broadcastCurrentState = (overrideTimeLeft = timeLeft, overrideStatus = status) => {
+  const broadcastCurrentState = useCallback((overrideTimeLeft = timeLeft, overrideStatus = status) => {
     const sessionInfo = getSessionProgressInfo();
     const payload = {
       timeLeft: overrideTimeLeft,
       targetEndTime: overrideStatus === 'running' ? endTimeRef.current : null,
       status: overrideStatus,
-      sessionName: currentStep ? currentStep.name : 'STUDY',
-      sessionType: currentStep ? currentStep.type : 'study',
+      sessionName: currentStep?.name || 'STUDY',
+      sessionType: currentStep?.type || 'study',
       sessionProgressText: sessionInfo.text,
       loopProgressText: sessionInfo.loopText,
-      overlayFontSize: settings.overlayFontSize,
-      overlayColor: settings.overlayColor,
-      overlayLabelColor: settings.overlayLabelColor || '#fef08a',
-      overlayLabelFontSize: settings.overlayLabelFontSize || 36,
-      overlayShowLabel: settings.overlayShowLabel,
-      overlayShowSessionCount: settings.overlayShowSessionCount !== false,
-      overlayFontFamily: settings.overlayFontFamily,
+      overlayFontSize: settingsRef.current.overlayFontSize,
+      overlayColor: settingsRef.current.overlayColor,
+      overlayLabelColor: settingsRef.current.overlayLabelColor || '#fef08a',
+      overlayLabelFontSize: settingsRef.current.overlayLabelFontSize || 36,
+      overlayShowLabel: settingsRef.current.overlayShowLabel,
+      overlayShowSessionCount: settingsRef.current.overlayShowSessionCount !== false,
+      overlayFontFamily: settingsRef.current.overlayFontFamily,
       timestamp: Date.now()
     };
     syncChannel.postState(payload);
-  };
+  }, [currentStep, getSessionProgressInfo, timeLeft, status]);
 
-  // Sync state when tab visibility changes or comes back to focus
+  // Handle page visibility changes
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && status === 'running' && endTimeRef.current) {
+      if (document.visibilityState === 'visible' && statusRef.current === 'running' && endTimeRef.current) {
         const now = Date.now();
         const remainingMs = Math.max(0, endTimeRef.current - now);
         const remainingSec = Math.ceil(remainingMs / 1000);
         setTimeLeft(remainingSec);
+        
         if (remainingSec <= 0) {
           handleSessionComplete();
         }
       }
     };
+    
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('focus', handleVisibilityChange);
+    
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleVisibilityChange);
     };
-  }, [status]);
+  }, []);
 
-  // Broadcast state updates
+  // Broadcast state changes
   useEffect(() => {
     broadcastCurrentState();
-  }, [timeLeft, status, currentStepIndex, settings]);
+  }, [timeLeft, status, currentStepIndex, settings, broadcastCurrentState]);
 
-  // Handle ambient audio switching based on status and session type
+  // Handle ambient audio
   useEffect(() => {
     audioEngine.setVolume(settings.volume);
     audioEngine.setMuted(settings.isMuted);
@@ -305,25 +315,24 @@ export function TimerProvider({ children }) {
     }
   }, [status, currentStep.type, settings.studySound, settings.breakSound, settings.volume, settings.isMuted, settings.isAmbientEnabled]);
 
-  // Reset timer duration when session index or duration settings change in idle mode
+  // Update timeLeft when idle and step changes
   useEffect(() => {
     if (status === 'idle') {
       const step = sequence[currentStepIndex] || sequence[0];
       if (step) {
-        setTimeLeft(step.duration * 60);
+        const newSeconds = step.duration * 60;
+        setTimeLeft(newSeconds);
       }
     }
-  }, [currentStepIndex, settings.modeType, settings.studyDuration, settings.shortBreakDuration, settings.longBreakDuration, settings.customSequence]);
+  }, [currentStepIndex, settings.modeType, settings.studyDuration, settings.shortBreakDuration, settings.longBreakDuration, settings.customSequence, status, sequence]);
 
-  // Timer Worker Ref
-  const workerRef = useRef(null);
-
-  // Initialize Web Worker instance
+  // Initialize Web Worker on mount
   useEffect(() => {
     const worker = createTimerWorker();
     if (worker) {
-      worker.onmessage = () => {
+      worker.onmessage = (e) => {
         if (!endTimeRef.current) return;
+        
         const now = Date.now();
         const remainingMs = Math.max(0, endTimeRef.current - now);
         const remainingSec = Math.ceil(remainingMs / 1000);
@@ -341,39 +350,67 @@ export function TimerProvider({ children }) {
 
     return () => {
       if (workerRef.current) {
-        workerRef.current.postMessage({ command: 'stop' });
-        workerRef.current.terminate();
+        try {
+          workerRef.current.postMessage({ command: 'stop' });
+          workerRef.current.terminate();
+        } catch (err) {}
         workerRef.current = null;
       }
     };
-  }, []);
+  }, [broadcastCurrentState]);
 
-  const stopTicker = () => {
+  const stopTicker = useCallback(() => {
     if (workerRef.current) {
-      workerRef.current.postMessage({ command: 'stop' });
+      try {
+        workerRef.current.postMessage({ command: 'stop' });
+      } catch (err) {}
     }
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
-  };
+  }, []);
 
-  // Timer Tick Mechanism (Unthrottled Web Worker Ticker + fallback)
-  const startTimer = (forceStart = false) => {
+  const startTimer = useCallback((forceStart = false) => {
     audioEngine.initContext();
-    if (status === 'running' && !forceStart) return;
+    
+    if (statusRef.current === 'running' && !forceStart) return;
 
     setStatus('running');
+    statusRef.current = 'running';
+    
     if (!endTimeRef.current || !forceStart) {
-      endTimeRef.current = Date.now() + timeLeft * 1000;
+      endTimeRef.current = Date.now() + timeLeftRef.current * 1000;
     }
 
     stopTicker();
 
     if (workerRef.current) {
-      workerRef.current.postMessage({ command: 'start', interval: 250 });
+      try {
+        workerRef.current.postMessage({ command: 'start', interval: 250 });
+      } catch (err) {
+        console.warn('Worker start failed, using fallback:', err);
+        // Fallback to setInterval
+        timerRef.current = setInterval(() => {
+          if (!endTimeRef.current) return;
+          
+          const now = Date.now();
+          const remainingMs = Math.max(0, endTimeRef.current - now);
+          const remainingSec = Math.ceil(remainingMs / 1000);
+
+          setTimeLeft(remainingSec);
+          broadcastCurrentState(remainingSec, 'running');
+
+          if (remainingSec <= 0) {
+            stopTicker();
+            handleSessionComplete();
+          }
+        }, 250);
+      }
     } else {
       timerRef.current = setInterval(() => {
+        if (!endTimeRef.current) return;
+        
         const now = Date.now();
         const remainingMs = Math.max(0, endTimeRef.current - now);
         const remainingSec = Math.ceil(remainingMs / 1000);
@@ -387,99 +424,124 @@ export function TimerProvider({ children }) {
         }
       }, 250);
     }
-  };
+  }, [stopTicker, broadcastCurrentState]);
 
-  const pauseTimer = () => {
+  const pauseTimer = useCallback(() => {
     stopTicker();
     setStatus('paused');
-    broadcastCurrentState(timeLeft, 'paused');
-  };
+    statusRef.current = 'paused';
+    broadcastCurrentState(timeLeftRef.current, 'paused');
+  }, [stopTicker, broadcastCurrentState]);
 
-  const resumeTimer = () => {
+  const resumeTimer = useCallback(() => {
     startTimer();
-  };
+  }, [startTimer]);
 
-  const resetTimer = () => {
+  const resetTimer = useCallback(() => {
     stopTicker();
     setStatus('idle');
-    const step = sequence[currentStepIndex] || sequence[0];
+    statusRef.current = 'idle';
+    const step = sequence[currentStepIndexRef.current] || sequence[0];
     const initialSeconds = step ? step.duration * 60 : 50 * 60;
     setTimeLeft(initialSeconds);
     broadcastCurrentState(initialSeconds, 'idle');
-  };
+  }, [stopTicker, sequence, broadcastCurrentState]);
 
-  const skipSession = () => {
+  const skipSession = useCallback(() => {
     stopTicker();
     advanceToNextSession();
-  };
+  }, [stopTicker]);
 
-  const advanceToNextSession = () => {
-    const nextIndex = currentStepIndex + 1;
+  const advanceToNextSession = useCallback(() => {
+    const nextIndex = currentStepIndexRef.current + 1;
+    const seq = getSequence(settingsRef.current);
 
-    if (nextIndex < sequence.length) {
+    if (nextIndex < seq.length) {
       setCurrentStepIndex(nextIndex);
-      const nextStep = sequence[nextIndex];
+      currentStepIndexRef.current = nextIndex;
+      const nextStep = seq[nextIndex];
       const nextSeconds = nextStep.duration * 60;
       setTimeLeft(nextSeconds);
+      timeLeftRef.current = nextSeconds;
 
-      if (status === 'running') {
+      if (statusRef.current === 'running') {
         endTimeRef.current = Date.now() + nextSeconds * 1000;
         startTimer();
       } else {
         setStatus('idle');
+        statusRef.current = 'idle';
       }
     } else {
-      // Reached end of current sequence loop
-      if (settings.repeatMode === 'continuous') {
+      if (settingsRef.current.repeatMode === 'continuous') {
         setCurrentStepIndex(0);
+        currentStepIndexRef.current = 0;
         setCurrentLoopCount(prev => prev + 1);
-        const firstStep = sequence[0];
+        currentLoopCountRef.current = currentLoopCountRef.current + 1;
+        
+        const firstStep = seq[0];
         const nextSeconds = firstStep.duration * 60;
         setTimeLeft(nextSeconds);
-        if (status === 'running') {
+        timeLeftRef.current = nextSeconds;
+        
+        if (statusRef.current === 'running') {
           endTimeRef.current = Date.now() + nextSeconds * 1000;
           startTimer();
         }
-      } else if (settings.repeatMode === 'count') {
-        if (currentLoopCount < settings.targetLoops) {
+      } else if (settingsRef.current.repeatMode === 'count') {
+        if (currentLoopCountRef.current < settingsRef.current.targetLoops) {
           setCurrentStepIndex(0);
+          currentStepIndexRef.current = 0;
           setCurrentLoopCount(prev => prev + 1);
-          const firstStep = sequence[0];
+          currentLoopCountRef.current = currentLoopCountRef.current + 1;
+          
+          const firstStep = seq[0];
           const nextSeconds = firstStep.duration * 60;
           setTimeLeft(nextSeconds);
-          if (status === 'running') {
+          timeLeftRef.current = nextSeconds;
+          
+          if (statusRef.current === 'running') {
             endTimeRef.current = Date.now() + nextSeconds * 1000;
             startTimer();
           }
         } else {
-          // Finished all loops
           setStatus('idle');
+          statusRef.current = 'idle';
           setCurrentStepIndex(0);
+          currentStepIndexRef.current = 0;
           setCurrentLoopCount(1);
-          const firstStep = sequence[0];
-          setTimeLeft(firstStep ? firstStep.duration * 60 : 50 * 60);
+          currentLoopCountRef.current = 1;
+          
+          const firstStep = seq[0];
+          const finalSeconds = firstStep ? firstStep.duration * 60 : 50 * 60;
+          setTimeLeft(finalSeconds);
+          timeLeftRef.current = finalSeconds;
         }
       } else {
-        // repeatMode === 'none'
         setStatus('idle');
+        statusRef.current = 'idle';
         setCurrentStepIndex(0);
-        const firstStep = sequence[0];
-        setTimeLeft(firstStep ? firstStep.duration * 60 : 50 * 60);
+        currentStepIndexRef.current = 0;
+        
+        const firstStep = seq[0];
+        const finalSeconds = firstStep ? firstStep.duration * 60 : 50 * 60;
+        setTimeLeft(finalSeconds);
+        timeLeftRef.current = finalSeconds;
       }
     }
-  };
+  }, [getSequence, startTimer]);
 
-  const handleSessionComplete = () => {
+  const handleSessionComplete = useCallback(() => {
     audioEngine.playSessionChime();
     advanceToNextSession();
-  };
+  }, [advanceToNextSession]);
 
-  const updateSettings = (newPartialSettings) => {
+  const updateSettings = useCallback((newPartialSettings) => {
     setSettings(prev => {
       const updated = { ...prev, ...newPartialSettings };
+      settingsRef.current = updated;
       return updated;
     });
-  };
+  }, []);
 
   const value = {
     settings,
