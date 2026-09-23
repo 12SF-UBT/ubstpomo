@@ -70,7 +70,7 @@ export const syncChannel = {
       const dataTimestamp = data.timestamp || 0;
       
       // Ignore older or duplicate messages
-      if (dataTimestamp < this.lastTimestamp) {
+      if (dataTimestamp <= this.lastTimestamp) {
         return false;
       }
       

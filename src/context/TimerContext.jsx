@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { audioEngine } from '../utils/audioEngine';
 import { syncChannel } from '../utils/syncChannel';
 
@@ -70,6 +70,52 @@ const DEFAULT_SETTINGS = {
   overlayFontFamily: 'mono',
 };
 
+// Read the persisted run state synchronously so the very first render already
+// reflects a running/paused session (restoring in an effect lets the idle-reset
+// effect clobber the restored timeLeft in the same commit)
+const loadRunState = (settings) => {
+  const idleState = {
+    status: 'idle',
+    timeLeft: (settings?.studyDuration || 50) * 60,
+    targetEndTime: null,
+    currentStepIndex: 0,
+    currentLoopCount: 1,
+  };
+
+  try {
+    const saved = localStorage.getItem(RUN_STATE_KEY);
+    if (!saved) return idleState;
+    const parsed = JSON.parse(saved);
+
+    if (parsed.status === 'running' && parsed.targetEndTime) {
+      const remainingMs = Math.max(0, parsed.targetEndTime - Date.now());
+      const remainingSec = Math.ceil(remainingMs / 1000);
+
+      if (remainingSec > 0) {
+        return {
+          status: 'running',
+          timeLeft: remainingSec,
+          targetEndTime: parsed.targetEndTime,
+          currentStepIndex: parsed.currentStepIndex || 0,
+          currentLoopCount: parsed.currentLoopCount || 1,
+        };
+      }
+    } else if (parsed.status === 'paused') {
+      return {
+        status: 'paused',
+        timeLeft: parsed.timeLeft || 50 * 60,
+        targetEndTime: null,
+        currentStepIndex: parsed.currentStepIndex || 0,
+        currentLoopCount: parsed.currentLoopCount || 1,
+      };
+    }
+  } catch (e) {
+    console.warn('Failed to restore run state:', e);
+  }
+
+  return idleState;
+};
+
 const TimerContext = createContext(null);
 
 export function TimerProvider({ children }) {
@@ -85,56 +131,23 @@ export function TimerProvider({ children }) {
     return DEFAULT_SETTINGS;
   });
 
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const [currentLoopCount, setCurrentLoopCount] = useState(1);
-  const [status, setStatus] = useState('idle');
-  const [timeLeft, setTimeLeft] = useState(50 * 60);
+  const [initialRunState] = useState(() => loadRunState(settings));
+
+  const [currentStepIndex, setCurrentStepIndex] = useState(initialRunState.currentStepIndex);
+  const [currentLoopCount, setCurrentLoopCount] = useState(initialRunState.currentLoopCount);
+  const [status, setStatus] = useState(initialRunState.status);
+  const [timeLeft, setTimeLeft] = useState(initialRunState.timeLeft);
 
   // Use refs to track timing state without triggering re-renders
-  const endTimeRef = useRef(null);
+  const endTimeRef = useRef(initialRunState.targetEndTime);
   const timerRef = useRef(null);
   const workerRef = useRef(null);
-  const currentStepIndexRef = useRef(0);
-  const currentLoopCountRef = useRef(1);
-  const statusRef = useRef('idle');
+  const tickRef = useRef(null);
+  const currentStepIndexRef = useRef(initialRunState.currentStepIndex);
+  const currentLoopCountRef = useRef(initialRunState.currentLoopCount);
+  const statusRef = useRef(initialRunState.status);
   const settingsRef = useRef(settings);
-  const timeLeftRef = useRef(50 * 60);
-
-  // Restore runtime state on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(RUN_STATE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        
-        if (parsed.status === 'running' && parsed.targetEndTime) {
-          const remainingMs = Math.max(0, parsed.targetEndTime - Date.now());
-          const remainingSec = Math.ceil(remainingMs / 1000);
-          
-          if (remainingSec > 0) {
-            setStatus('running');
-            setTimeLeft(remainingSec);
-            setCurrentStepIndex(parsed.currentStepIndex || 0);
-            setCurrentLoopCount(parsed.currentLoopCount || 1);
-            endTimeRef.current = parsed.targetEndTime;
-            
-            // Auto-start timer
-            timeLeftRef.current = remainingSec;
-            statusRef.current = 'running';
-          }
-        } else if (parsed.status === 'paused') {
-          setStatus('paused');
-          setTimeLeft(parsed.timeLeft || 50 * 60);
-          setCurrentStepIndex(parsed.currentStepIndex || 0);
-          setCurrentLoopCount(parsed.currentLoopCount || 1);
-          timeLeftRef.current = parsed.timeLeft || 50 * 60;
-          statusRef.current = 'paused';
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to restore run state:', e);
-    }
-  }, []);
+  const timeLeftRef = useRef(initialRunState.timeLeft);
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -192,7 +205,8 @@ export function TimerProvider({ children }) {
     return seq;
   }, []);
 
-  const sequence = getSequence(settings);
+  // Memoized so the callbacks below keep a stable identity between ticks
+  const sequence = useMemo(() => getSequence(settings), [getSequence, settings]);
   const currentStep = sequence[currentStepIndex] || sequence[0];
 
   const getSessionProgressInfo = useCallback(() => {
@@ -276,15 +290,8 @@ export function TimerProvider({ children }) {
   // Handle page visibility changes
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && statusRef.current === 'running' && endTimeRef.current) {
-        const now = Date.now();
-        const remainingMs = Math.max(0, endTimeRef.current - now);
-        const remainingSec = Math.ceil(remainingMs / 1000);
-        setTimeLeft(remainingSec);
-        
-        if (remainingSec <= 0) {
-          handleSessionComplete();
-        }
+      if (document.visibilityState === 'visible') {
+        tickRef.current?.();
       }
     };
     
@@ -326,39 +333,6 @@ export function TimerProvider({ children }) {
     }
   }, [currentStepIndex, settings.modeType, settings.studyDuration, settings.shortBreakDuration, settings.longBreakDuration, settings.customSequence, status, sequence]);
 
-  // Initialize Web Worker on mount
-  useEffect(() => {
-    const worker = createTimerWorker();
-    if (worker) {
-      worker.onmessage = (e) => {
-        if (!endTimeRef.current) return;
-        
-        const now = Date.now();
-        const remainingMs = Math.max(0, endTimeRef.current - now);
-        const remainingSec = Math.ceil(remainingMs / 1000);
-
-        setTimeLeft(remainingSec);
-        broadcastCurrentState(remainingSec, 'running');
-
-        if (remainingSec <= 0) {
-          stopTicker();
-          handleSessionComplete();
-        }
-      };
-      workerRef.current = worker;
-    }
-
-    return () => {
-      if (workerRef.current) {
-        try {
-          workerRef.current.postMessage({ command: 'stop' });
-          workerRef.current.terminate();
-        } catch (err) {}
-        workerRef.current = null;
-      }
-    };
-  }, [broadcastCurrentState]);
-
   const stopTicker = useCallback(() => {
     if (workerRef.current) {
       try {
@@ -371,60 +345,37 @@ export function TimerProvider({ children }) {
     }
   }, []);
 
-  const startTimer = useCallback((forceStart = false) => {
-    audioEngine.initContext();
-    
-    if (statusRef.current === 'running' && !forceStart) return;
-
-    setStatus('running');
-    statusRef.current = 'running';
-    
-    if (!endTimeRef.current || !forceStart) {
-      endTimeRef.current = Date.now() + timeLeftRef.current * 1000;
-    }
-
+  // Ticks always go through tickRef so the long-lived worker/interval never
+  // runs a stale closure (and never has to be recreated when state changes)
+  const startTicker = useCallback(() => {
     stopTicker();
 
     if (workerRef.current) {
       try {
         workerRef.current.postMessage({ command: 'start', interval: 250 });
+        return;
       } catch (err) {
         console.warn('Worker start failed, using fallback:', err);
-        // Fallback to setInterval
-        timerRef.current = setInterval(() => {
-          if (!endTimeRef.current) return;
-          
-          const now = Date.now();
-          const remainingMs = Math.max(0, endTimeRef.current - now);
-          const remainingSec = Math.ceil(remainingMs / 1000);
-
-          setTimeLeft(remainingSec);
-          broadcastCurrentState(remainingSec, 'running');
-
-          if (remainingSec <= 0) {
-            stopTicker();
-            handleSessionComplete();
-          }
-        }, 250);
       }
-    } else {
-      timerRef.current = setInterval(() => {
-        if (!endTimeRef.current) return;
-        
-        const now = Date.now();
-        const remainingMs = Math.max(0, endTimeRef.current - now);
-        const remainingSec = Math.ceil(remainingMs / 1000);
-
-        setTimeLeft(remainingSec);
-        broadcastCurrentState(remainingSec, 'running');
-
-        if (remainingSec <= 0) {
-          stopTicker();
-          handleSessionComplete();
-        }
-      }, 250);
     }
-  }, [stopTicker, broadcastCurrentState]);
+
+    timerRef.current = setInterval(() => tickRef.current?.(), 250);
+  }, [stopTicker]);
+
+  const startTimer = useCallback((forceStart = false) => {
+    audioEngine.initContext();
+
+    if (statusRef.current === 'running' && !forceStart) return;
+
+    setStatus('running');
+    statusRef.current = 'running';
+
+    if (!endTimeRef.current || !forceStart) {
+      endTimeRef.current = Date.now() + timeLeftRef.current * 1000;
+    }
+
+    startTicker();
+  }, [startTicker]);
 
   const pauseTimer = useCallback(() => {
     stopTicker();
@@ -466,7 +417,7 @@ export function TimerProvider({ children }) {
 
       if (statusRef.current === 'running') {
         endTimeRef.current = Date.now() + nextSeconds * 1000;
-        startTimer();
+        startTimer(true);
       } else {
         setStatus('idle');
         statusRef.current = 'idle';
@@ -485,7 +436,7 @@ export function TimerProvider({ children }) {
         
         if (statusRef.current === 'running') {
           endTimeRef.current = Date.now() + nextSeconds * 1000;
-          startTimer();
+          startTimer(true);
         }
       } else if (settingsRef.current.repeatMode === 'count') {
         if (currentLoopCountRef.current < settingsRef.current.targetLoops) {
@@ -501,7 +452,7 @@ export function TimerProvider({ children }) {
           
           if (statusRef.current === 'running') {
             endTimeRef.current = Date.now() + nextSeconds * 1000;
-            startTimer();
+            startTimer(true);
           }
         } else {
           setStatus('idle');
@@ -534,6 +485,51 @@ export function TimerProvider({ children }) {
     audioEngine.playSessionChime();
     advanceToNextSession();
   }, [advanceToNextSession]);
+
+  // Single tick handler shared by the worker, the setInterval fallback and the
+  // visibility handler. State is broadcast by the effect that watches timeLeft.
+  const tick = useCallback(() => {
+    if (statusRef.current !== 'running' || !endTimeRef.current) return;
+
+    const remainingMs = Math.max(0, endTimeRef.current - Date.now());
+    const remainingSec = Math.ceil(remainingMs / 1000);
+
+    setTimeLeft(remainingSec);
+
+    if (remainingSec <= 0) {
+      stopTicker();
+      handleSessionComplete();
+    }
+  }, [stopTicker, handleSessionComplete]);
+
+  useEffect(() => {
+    tickRef.current = tick;
+  }, [tick]);
+
+  // Create the Web Worker once for the lifetime of the provider. It must not be
+  // recreated on re-render, otherwise the freshly started ticker is terminated.
+  useEffect(() => {
+    const worker = createTimerWorker();
+    if (worker) {
+      worker.onmessage = () => tickRef.current?.();
+      workerRef.current = worker;
+    }
+
+    // Resume a session that was still running when the page was refreshed
+    if (statusRef.current === 'running' && endTimeRef.current) {
+      startTimer(true);
+    }
+
+    return () => {
+      stopTicker();
+      if (workerRef.current) {
+        try {
+          workerRef.current.terminate();
+        } catch (err) {}
+        workerRef.current = null;
+      }
+    };
+  }, []);
 
   const updateSettings = useCallback((newPartialSettings) => {
     setSettings(prev => {

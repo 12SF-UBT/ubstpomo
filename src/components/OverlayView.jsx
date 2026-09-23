@@ -75,34 +75,17 @@ export function OverlayView() {
     };
   }, []);
 
-  // Continuous system-clock countdown ticker (every 250ms)
-  // Ticks even if main window is minimized because it's based on targetEndTime
+  // While running, the displayed time is derived purely from targetEndTime so it
+  // keeps ticking when the main window is minimized, and a stale timeLeft from a
+  // late SSE/poll message can never make the digits jump backwards.
+  const isLive = overlayState.status === 'running' && !!overlayState.targetEndTime;
+  const [, setTick] = useState(0);
+
   useEffect(() => {
-    if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
-      return;
-    }
-
-    const updateDisplayTime = () => {
-      const now = Date.now();
-      const remainingMs = Math.max(0, overlayState.targetEndTime - now);
-      const remainingSec = Math.ceil(remainingMs / 1000);
-      
-      setOverlayState((prev) => {
-        if (prev.timeLeft === remainingSec) {
-          return prev;
-        }
-        return { ...prev, timeLeft: remainingSec };
-      });
-    };
-
-    // Initial update
-    updateDisplayTime();
-
-    // Set up tick interval
-    const interval = setInterval(updateDisplayTime, 250);
-
+    if (!isLive) return;
+    const interval = setInterval(() => setTick((t) => t + 1), 250);
     return () => clearInterval(interval);
-  }, [overlayState.status, overlayState.targetEndTime]);
+  }, [isLive]);
 
   // Listen for real-time state broadcasts from main timer window
   useEffect(() => {
@@ -144,7 +127,10 @@ export function OverlayView() {
     };
   }, []);
 
-  const formattedTime = formatTime(overlayState.timeLeft);
+  const displaySeconds = isLive
+    ? Math.ceil(Math.max(0, overlayState.targetEndTime - Date.now()) / 1000)
+    : overlayState.timeLeft;
+  const formattedTime = formatTime(displaySeconds);
 
   const cleanSessionCount = (overlayState.sessionProgressText || '')
     .replace(' / ', '/')

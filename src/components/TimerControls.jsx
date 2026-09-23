@@ -10,7 +10,7 @@ export function TimerControls() {
       {/* Start / Pause / Resume Main Button */}
       {status === 'idle' && (
         <button
-          onClick={startTimer}
+          onClick={() => startTimer()}
           className="flex items-center gap-2 px-8 py-4 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-lg rounded-2xl shadow-lg shadow-emerald-500/20 hover:shadow-emerald-500/30 transition-all duration-200 active:scale-95"
         >
           <Play className="w-6 h-6 fill-current" />
