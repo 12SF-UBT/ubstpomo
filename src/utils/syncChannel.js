@@ -75,7 +75,20 @@ export const syncChannel = {
       } catch (e) {}
     }
 
-    // 3. Fallback HTTP Poll every 500ms if SSE or BroadcastChannel are disconnected
+    // 3. Listen via window storage event (cross-window fallback when Chrome throttles background fetch)
+    const storageHandler = (e) => {
+      if (e.key === 'ubst_pomo_run_state_v1' && e.newValue) {
+        try {
+          const data = JSON.parse(e.newValue);
+          processData(data);
+        } catch (err) {}
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', storageHandler);
+    }
+
+    // 4. Fallback HTTP Poll every 500ms if SSE or BroadcastChannel are disconnected
     const pollInterval = setInterval(() => {
       if (typeof fetch !== 'undefined') {
         fetch('/api/sync')
@@ -95,6 +108,9 @@ export const syncChannel = {
       }
       if (eventSource) {
         eventSource.close();
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('storage', storageHandler);
       }
       clearInterval(pollInterval);
     };

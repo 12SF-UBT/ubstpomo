@@ -59,6 +59,27 @@ export function OverlayView() {
     };
   }, []);
 
+  // Unthrottled target-time countdown ticker inside Camo Studio
+  // Continues ticking every frame even if the main website window is minimized
+  useEffect(() => {
+    if (overlayState.status !== 'running' || !overlayState.targetEndTime) {
+      return;
+    }
+
+    const updateDisplayTime = () => {
+      const remainingMs = Math.max(0, overlayState.targetEndTime - Date.now());
+      const remainingSec = Math.ceil(remainingMs / 1000);
+      setOverlayState((prev) => {
+        if (prev.timeLeft === remainingSec) return prev;
+        return { ...prev, timeLeft: remainingSec };
+      });
+    };
+
+    updateDisplayTime();
+    const interval = setInterval(updateDisplayTime, 250);
+    return () => clearInterval(interval);
+  }, [overlayState.status, overlayState.targetEndTime]);
+
   // Listen for real-time broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
