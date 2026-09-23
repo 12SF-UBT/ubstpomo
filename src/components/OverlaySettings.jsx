@@ -1,0 +1,129 @@
+import React, { useState } from 'react';
+import { useTimer } from '../context/TimerContext';
+import { ExternalLink, Copy, Check, Tv, Palette, Type } from 'lucide-react';
+
+export function OverlaySettings() {
+  const { settings, updateSettings } = useTimer();
+  const [copied, setCopied] = useState(false);
+
+  // Generate exact overlay URL for Camo Studio Web Capture
+  const overlayUrl = `${window.location.origin}${window.location.pathname}#/overlay`;
+
+  const handleOpenOverlay = () => {
+    window.open(overlayUrl, 'CamoPomodoroOverlay', 'width=600,height=300,toolbar=no,menubar=no,status=no,resizable=yes');
+  };
+
+  const handleCopyUrl = () => {
+    navigator.clipboard.writeText(overlayUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800/80 rounded-3xl p-6 shadow-xl space-y-5">
+      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+        <div className="flex items-center gap-2 text-indigo-400 font-bold text-lg">
+          <Tv className="w-5 h-5" />
+          <span>Camo Studio Overlay Mode</span>
+        </div>
+
+        <button
+          onClick={handleOpenOverlay}
+          className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-indigo-500/25 transition-all active:scale-95"
+        >
+          <ExternalLink className="w-4 h-4" />
+          <span>OPEN OVERLAY</span>
+        </button>
+      </div>
+
+      <p className="text-slate-400 text-xs leading-relaxed">
+        Overlay Mode is designed with a transparent background for Camo Studio Web Capture. Load this URL into Camo Studio as a Web Layer:
+      </p>
+
+      {/* Copy URL Input Group */}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          readOnly
+          value={overlayUrl}
+          className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none"
+        />
+        <button
+          onClick={handleCopyUrl}
+          className="flex items-center gap-1 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-slate-700 transition-colors"
+        >
+          {copied ? (
+            <>
+              <Check className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-emerald-400">Copied!</span>
+            </>
+          ) : (
+            <>
+              <Copy className="w-3.5 h-3.5" />
+              <span>Copy URL</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Customizations Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+        {/* Font Size */}
+        <div>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 mb-1">
+            <Type className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Font Size (px)</span>
+          </label>
+          <input
+            type="number"
+            min="40"
+            max="300"
+            step="10"
+            value={settings.overlayFontSize}
+            onChange={(e) => updateSettings({ overlayFontSize: parseInt(e.target.value, 10) || 120 })}
+            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+          />
+        </div>
+
+        {/* Text Color */}
+        <div>
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 mb-1">
+            <Palette className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Text Color</span>
+          </label>
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={settings.overlayColor}
+              onChange={(e) => updateSettings({ overlayColor: e.target.value })}
+              className="w-8 h-8 rounded-lg bg-transparent border-0 cursor-pointer"
+            />
+            <input
+              type="text"
+              value={settings.overlayColor}
+              onChange={(e) => updateSettings({ overlayColor: e.target.value })}
+              className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-2.5 py-2 text-white font-mono text-xs focus:outline-none focus:border-indigo-500"
+            />
+          </div>
+        </div>
+
+        {/* Session Label Toggle */}
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">
+            Session Label
+          </label>
+          <button
+            onClick={() => updateSettings({ overlayShowLabel: !settings.overlayShowLabel })}
+            className={`w-full py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+              settings.overlayShowLabel
+                ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                : 'bg-slate-950 text-slate-500 border-slate-800'
+            }`}
+          >
+            {settings.overlayShowLabel ? 'Label ON' : 'Label OFF'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
