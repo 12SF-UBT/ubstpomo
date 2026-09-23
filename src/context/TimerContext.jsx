@@ -30,6 +30,7 @@ const createTimerWorker = () => {
 };
 
 const STORAGE_KEY = 'ubst_pomo_settings_v1';
+const RUN_STATE_KEY = 'ubst_pomo_run_state_v1';
 
 const DEFAULT_SETTINGS = {
   modeType: 'standard', // 'standard' | 'custom'
@@ -87,17 +88,55 @@ export function TimerProvider({ children }) {
     return DEFAULT_SETTINGS;
   });
 
+  // Load active runtime state from localStorage if refreshed/reopened
+  const initialRunState = (() => {
+    try {
+      const saved = localStorage.getItem(RUN_STATE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.status === 'running' && parsed.targetEndTime) {
+          const remainingMs = parsed.targetEndTime - Date.now();
+          const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+          if (remainingSec > 0) {
+            return {
+              status: 'running',
+              timeLeft: remainingSec,
+              targetEndTime: parsed.targetEndTime,
+              currentStepIndex: parsed.currentStepIndex || 0,
+              currentLoopCount: parsed.currentLoopCount || 1,
+            };
+          }
+        } else if (parsed.status === 'paused' && typeof parsed.timeLeft === 'number') {
+          return {
+            status: 'paused',
+            timeLeft: parsed.timeLeft,
+            targetEndTime: null,
+            currentStepIndex: parsed.currentStepIndex || 0,
+            currentLoopCount: parsed.currentLoopCount || 1,
+          };
+        }
+      }
+    } catch (e) {}
+    return {
+      status: 'idle',
+      timeLeft: (settings?.studyDuration || 50) * 60,
+      targetEndTime: null,
+      currentStepIndex: 0,
+      currentLoopCount: 1,
+    };
+  })();
+
   // Current session tracking
-  const [currentStepIndex, setCurrentStepIndex] = useState(0);
-  const [currentLoopCount, setCurrentLoopCount] = useState(1);
-  const [status, setStatus] = useState('idle'); // 'idle' | 'running' | 'paused'
+  const [currentStepIndex, setCurrentStepIndex] = useState(initialRunState.currentStepIndex);
+  const [currentLoopCount, setCurrentLoopCount] = useState(initialRunState.currentLoopCount);
+  const [status, setStatus] = useState(initialRunState.status); // 'idle' | 'running' | 'paused'
   
   // Seconds remaining in current step
-  const [timeLeft, setTimeLeft] = useState(settings.studyDuration * 60);
+  const [timeLeft, setTimeLeft] = useState(initialRunState.timeLeft);
 
   // Timer interval ref
   const timerRef = useRef(null);
-  const endTimeRef = useRef(null);
+  const endTimeRef = useRef(initialRunState.targetEndTime);
 
   // Calculate current active session sequence array based on modeType
   const getSequence = (currentSettings = settings) => {
@@ -182,6 +221,27 @@ export function TimerProvider({ children }) {
       console.warn('Failed to save settings', e);
     }
   }, [settings]);
+
+  // Save active runtime state to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(RUN_STATE_KEY, JSON.stringify({
+        status,
+        timeLeft,
+        targetEndTime: status === 'running' ? endTimeRef.current : null,
+        currentStepIndex,
+        currentLoopCount,
+        timestamp: Date.now()
+      }));
+    } catch (e) {}
+  }, [status, timeLeft, currentStepIndex, currentLoopCount]);
+
+  // Auto resume timer on refresh if it was running
+  useEffect(() => {
+    if (initialRunState.status === 'running') {
+      startTimer();
+    }
+  }, []);
 
   // Sync state broadcast whenever critical state changes
   const broadcastCurrentState = (overrideTimeLeft = timeLeft, overrideStatus = status) => {
