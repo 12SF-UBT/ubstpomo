@@ -1,7 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { syncChannel } from '../utils/syncChannel';
+import React, { useState, useEffect } from 'react';
+import { syncChannel, getRoomFromUrl, getStoredRoom } from '../utils/syncChannel';
+import { getProgressInfo, resolvePosition, secondsUntil, sessionSeconds } from '../utils/timeline';
 
 const STORAGE_KEY = 'ubst_pomo_settings_v1';
+
+// How long an overlay without a room waits for a timer before saying so
+const LINK_HINT_DELAY_MS = 5000;
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -11,11 +15,57 @@ function formatTime(seconds) {
   return `${mm}:${ss}`;
 }
 
+// What to show at `now`. While running, the session and its time left come
+// from the run plan, so the overlay moves on to the next session by itself even
+// when the timer tab is minimized, asleep or closed, and a late relay message
+// can never make the digits jump backwards.
+function getLiveView(state, now) {
+  const fromState = {
+    seconds: state.timeLeft,
+    sessionName: state.sessionName,
+    sessionProgressText: state.sessionProgressText,
+  };
+  if (state.status !== 'running' || !state.targetEndTime) return fromState;
+
+  const plan = state.plan;
+  const seq = plan?.sequence;
+  if (!Array.isArray(seq) || seq.length === 0) {
+    return { ...fromState, seconds: secondsUntil(state.targetEndTime, now) };
+  }
+
+  const position = resolvePosition(
+    seq,
+    plan,
+    state.currentStepIndex ?? 0,
+    state.currentLoopCount ?? 1,
+    state.targetEndTime,
+    now
+  );
+
+  // The whole run is over: the timer goes back to an idle first session
+  if (position.finished) {
+    return {
+      seconds: sessionSeconds(seq[0]),
+      sessionName: seq[0].name,
+      sessionProgressText: getProgressInfo(seq, plan, 0, 1).text,
+    };
+  }
+
+  return {
+    seconds: secondsUntil(position.endTime, now),
+    sessionName: (seq[position.index] || seq[0]).name,
+    sessionProgressText: getProgressInfo(seq, plan, position.index, position.loop).text,
+  };
+}
+
 export function OverlayView() {
   const [overlayState, setOverlayState] = useState(() => {
     let defaults = {
       timeLeft: 50 * 60,
       targetEndTime: null,
+      currentStepIndex: 0,
+      currentLoopCount: 1,
+      plan: null,
       status: 'idle',
       sessionName: 'STUDY',
       sessionType: 'study',
@@ -52,6 +102,12 @@ export function OverlayView() {
     return defaults;
   });
 
+  // The URL's room, or this browser's own timer when the overlay was opened
+  // here without one
+  const [room] = useState(() => getRoomFromUrl() || getStoredRoom());
+  const [hasTimer, setHasTimer] = useState(false);
+  const [waitedForTimer, setWaitedForTimer] = useState(false);
+
   // Set transparent background on mount
   useEffect(() => {
     const styleOverlay = () => {
@@ -75,9 +131,6 @@ export function OverlayView() {
     };
   }, []);
 
-  // While running, the displayed time is derived purely from targetEndTime so it
-  // keeps ticking when the main window is minimized, and a stale timeLeft from a
-  // late SSE/poll message can never make the digits jump backwards.
   const isLive = overlayState.status === 'running' && !!overlayState.targetEndTime;
   const [, setTick] = useState(0);
 
@@ -87,6 +140,11 @@ export function OverlayView() {
     return () => clearInterval(interval);
   }, [isLive]);
 
+  useEffect(() => {
+    const timeout = setTimeout(() => setWaitedForTimer(true), LINK_HINT_DELAY_MS);
+    return () => clearTimeout(timeout);
+  }, []);
+
   // Listen for real-time state broadcasts from main timer window
   useEffect(() => {
     const unsubscribe = syncChannel.subscribe((data) => {
@@ -94,10 +152,14 @@ export function OverlayView() {
         return;
       }
 
+      setHasTimer(true);
       setOverlayState((prev) => {
         const nextState = {
           timeLeft: typeof data.timeLeft === 'number' ? data.timeLeft : prev.timeLeft,
           targetEndTime: data.targetEndTime !== undefined ? data.targetEndTime : prev.targetEndTime,
+          currentStepIndex: typeof data.currentStepIndex === 'number' ? data.currentStepIndex : prev.currentStepIndex,
+          currentLoopCount: typeof data.currentLoopCount === 'number' ? data.currentLoopCount : prev.currentLoopCount,
+          plan: data.plan !== undefined ? data.plan : prev.plan,
           status: data.status || prev.status,
           sessionName: data.sessionName || prev.sessionName || 'STUDY',
           sessionType: data.sessionType || prev.sessionType || 'study',
@@ -118,26 +180,27 @@ export function OverlayView() {
 
         return nextState;
       });
-    });
+    }, room);
 
     return () => {
       if (unsubscribe && typeof unsubscribe === 'function') {
         unsubscribe();
       }
     };
-  }, []);
+  }, [room]);
 
-  const displaySeconds = isLive
-    ? Math.ceil(Math.max(0, overlayState.targetEndTime - Date.now()) / 1000)
-    : overlayState.timeLeft;
-  const formattedTime = formatTime(displaySeconds);
+  const { seconds, sessionName, sessionProgressText } = getLiveView(overlayState, Date.now());
+  const formattedTime = formatTime(seconds);
 
-  const cleanSessionCount = (overlayState.sessionProgressText || '')
+  const cleanSessionCount = (sessionProgressText || '')
     .replace(' / ', '/')
     .replace('Break after ', 'Break ');
 
+  // An old overlay link (no room) in OBS / Camo can't reach the timer
+  const showLinkHint = !room && !hasTimer && waitedForTimer;
+
   return (
-    <div 
+    <div
       className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4"
       style={{
         backgroundColor: 'transparent',
@@ -185,7 +248,7 @@ export function OverlayView() {
           }}
         >
           {overlayState.overlayShowLabel && (
-            <span>{overlayState.sessionName || 'STUDY'}</span>
+            <span>{sessionName || 'STUDY'}</span>
           )}
 
           {overlayState.overlayShowLabel && overlayState.overlayShowSessionCount && (
@@ -195,6 +258,15 @@ export function OverlayView() {
           {overlayState.overlayShowSessionCount && (
             <span>{cleanSessionCount || 'Session 1/4'}</span>
           )}
+        </div>
+      )}
+
+      {showLinkHint && (
+        <div
+          className="mt-4 text-center text-sm font-semibold text-white"
+          style={{ textShadow: '0 1px 4px rgba(0,0,0,0.95)' }}
+        >
+          Not linked to a timer. Copy the overlay URL from the timer page again.
         </div>
       )}
     </div>

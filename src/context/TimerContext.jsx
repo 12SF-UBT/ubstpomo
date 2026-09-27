@@ -1,6 +1,14 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { audioEngine } from '../utils/audioEngine';
 import { syncChannel } from '../utils/syncChannel';
+import {
+  buildSequence,
+  getNextPosition,
+  getProgressInfo,
+  resolvePosition,
+  secondsUntil,
+  sessionSeconds,
+} from '../utils/timeline';
 
 // Professional Unthrottled Web Worker Ticker Engine
 const createTimerWorker = () => {
@@ -34,6 +42,15 @@ const createTimerWorker = () => {
 
 const STORAGE_KEY = 'ubst_pomo_settings_v1';
 const RUN_STATE_KEY = 'ubst_pomo_run_state_v1';
+
+// The chime marks a session end the tab noticed on time. When the browser kept
+// this tab asleep past it, the timer catches up silently instead of chiming late.
+const CHIME_GRACE_MS = 60 * 1000;
+
+// Held while a session runs: Chrome and Edge don't freeze a background tab that
+// holds a Web Lock, so the chime and the next session happen on time even when
+// the browser is minimized for hours
+const RUNNING_LOCK = 'ubst_pomo_running';
 
 const DEFAULT_SETTINGS = {
   modeType: 'standard',
@@ -70,66 +87,90 @@ const DEFAULT_SETTINGS = {
   overlayFontFamily: 'mono',
 };
 
-// Read the persisted run state synchronously so the very first render already
-// reflects a running/paused session (restoring in an effect lets the idle-reset
-// effect clobber the restored timeLeft in the same commit)
-const loadRunState = (settings) => {
-  const idleState = {
-    status: 'idle',
-    timeLeft: (settings?.studyDuration || 50) * 60,
-    targetEndTime: null,
-    currentStepIndex: 0,
-    currentLoopCount: 1,
-  };
-
+const loadSettings = () => {
   try {
-    const saved = localStorage.getItem(RUN_STATE_KEY);
-    if (!saved) return idleState;
-    const parsed = JSON.parse(saved);
-
-    if (parsed.status === 'running' && parsed.targetEndTime) {
-      const remainingMs = Math.max(0, parsed.targetEndTime - Date.now());
-      const remainingSec = Math.ceil(remainingMs / 1000);
-
-      if (remainingSec > 0) {
-        return {
-          status: 'running',
-          timeLeft: remainingSec,
-          targetEndTime: parsed.targetEndTime,
-          currentStepIndex: parsed.currentStepIndex || 0,
-          currentLoopCount: parsed.currentLoopCount || 1,
-        };
-      }
-    } else if (parsed.status === 'paused') {
-      return {
-        status: 'paused',
-        timeLeft: parsed.timeLeft || 50 * 60,
-        targetEndTime: null,
-        currentStepIndex: parsed.currentStepIndex || 0,
-        currentLoopCount: parsed.currentLoopCount || 1,
-      };
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
     }
   } catch (e) {
-    console.warn('Failed to restore run state:', e);
+    console.warn('Failed to parse saved settings', e);
+  }
+  return DEFAULT_SETTINGS;
+};
+
+const idleAt = (seq, index, loop) => ({
+  status: 'idle',
+  timeLeft: sessionSeconds(seq[index] || seq[0]),
+  targetEndTime: null,
+  currentStepIndex: index,
+  currentLoopCount: loop,
+});
+
+const runningAt = (index, loop, endTime, now) => ({
+  status: 'running',
+  timeLeft: secondsUntil(endTime, now),
+  targetEndTime: endTime,
+  currentStepIndex: index,
+  currentLoopCount: loop,
+});
+
+// The run state to show for a saved one right now. A session that was running
+// while the tab was closed, discarded or asleep is followed forward on the wall
+// clock (not reset), just like the overlay does.
+const resolveRunState = (saved, settings) => {
+  const seq = buildSequence(settings);
+  const savedIndex = saved?.currentStepIndex;
+  const index = Number.isInteger(savedIndex) && savedIndex >= 0 && savedIndex < seq.length ? savedIndex : 0;
+  const loop = Number.isInteger(saved?.currentLoopCount) && saved.currentLoopCount > 0 ? saved.currentLoopCount : 1;
+
+  if (saved?.status === 'running' && saved.targetEndTime > 0) {
+    const now = Date.now();
+    const position = resolvePosition(seq, settings, index, loop, saved.targetEndTime, now);
+    return position.finished
+      ? idleAt(seq, 0, 1)
+      : runningAt(position.index, position.loop, position.endTime, now);
   }
 
-  return idleState;
+  if (saved?.status === 'paused' && saved.timeLeft > 0) {
+    return {
+      status: 'paused',
+      timeLeft: saved.timeLeft,
+      targetEndTime: null,
+      currentStepIndex: index,
+      currentLoopCount: loop,
+    };
+  }
+
+  return idleAt(seq, index, loop);
 };
+
+// Read synchronously so the very first render already reflects a running or
+// paused session
+const loadRunState = (settings) => {
+  try {
+    return resolveRunState(JSON.parse(localStorage.getItem(RUN_STATE_KEY)), settings);
+  } catch (e) {
+    console.warn('Failed to restore run state:', e);
+    return resolveRunState(null, settings);
+  }
+};
+
+// Only what changes on a start, pause, skip or session change (timeLeft follows
+// from targetEndTime while running), so other tabs hear about real changes only
+const serializeRunState = ({ status, timeLeft, targetEndTime, currentStepIndex, currentLoopCount }) =>
+  JSON.stringify({
+    status,
+    currentStepIndex,
+    currentLoopCount,
+    targetEndTime: status === 'running' ? targetEndTime : null,
+    timeLeft: status === 'paused' ? timeLeft : null,
+  });
 
 const TimerContext = createContext(null);
 
 export function TimerProvider({ children }) {
-  const [settings, setSettings] = useState(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
-      }
-    } catch (e) {
-      console.warn('Failed to parse saved settings', e);
-    }
-    return DEFAULT_SETTINGS;
-  });
+  const [settings, setSettings] = useState(loadSettings);
 
   const [initialRunState] = useState(() => loadRunState(settings));
 
@@ -137,6 +178,8 @@ export function TimerProvider({ children }) {
   const [currentLoopCount, setCurrentLoopCount] = useState(initialRunState.currentLoopCount);
   const [status, setStatus] = useState(initialRunState.status);
   const [timeLeft, setTimeLeft] = useState(initialRunState.timeLeft);
+  // End of the running session; state so the overlay hears when it moves
+  const [targetEndTime, setTargetEndTime] = useState(initialRunState.targetEndTime);
 
   // Use refs to track timing state without triggering re-renders
   const endTimeRef = useRef(initialRunState.targetEndTime);
@@ -148,6 +191,7 @@ export function TimerProvider({ children }) {
   const statusRef = useRef(initialRunState.status);
   const settingsRef = useRef(settings);
   const timeLeftRef = useRef(initialRunState.timeLeft);
+  const savedRunStateRef = useRef(null);
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -170,75 +214,14 @@ export function TimerProvider({ children }) {
     timeLeftRef.current = timeLeft;
   }, [timeLeft]);
 
-  const getSequence = useCallback((currentSettings = settings) => {
-    if (currentSettings.modeType === 'custom') {
-      return currentSettings.customSequence?.length > 0
-        ? currentSettings.customSequence
-        : [{ id: 'def', name: 'Study', type: 'study', duration: currentSettings.studyDuration }];
-    }
-
-    const seq = [];
-    for (let i = 1; i <= currentSettings.longBreakAfter; i++) {
-      seq.push({
-        id: `std-study-${i}`,
-        name: 'STUDY',
-        type: 'study',
-        duration: currentSettings.studyDuration,
-        stepNumber: i,
-      });
-      if (i < currentSettings.longBreakAfter) {
-        seq.push({
-          id: `std-short-${i}`,
-          name: 'SHORT BREAK',
-          type: 'break',
-          duration: currentSettings.shortBreakDuration,
-        });
-      } else {
-        seq.push({
-          id: `std-long-${i}`,
-          name: 'LONG BREAK',
-          type: 'break',
-          duration: currentSettings.longBreakDuration,
-        });
-      }
-    }
-    return seq;
-  }, []);
-
   // Memoized so the callbacks below keep a stable identity between ticks
-  const sequence = useMemo(() => getSequence(settings), [getSequence, settings]);
+  const sequence = useMemo(() => buildSequence(settings), [settings]);
   const currentStep = sequence[currentStepIndex] || sequence[0];
 
-  const getSessionProgressInfo = useCallback(() => {
-    if (settings.modeType === 'custom') {
-      const totalSteps = sequence.length;
-      return {
-        current: currentStepIndex + 1,
-        total: totalSteps,
-        text: `Session ${currentStepIndex + 1} / ${totalSteps}`,
-        loopText: settings.repeatMode === 'count' ? `Loop ${currentLoopCount} / ${settings.targetLoops}` : ''
-      };
-    } else {
-      const studySteps = sequence.filter(s => s.type === 'study');
-      let count = 0;
-      for (let i = 0; i <= currentStepIndex; i++) {
-        if (sequence[i] && sequence[i].type === 'study') {
-          count++;
-        }
-      }
-      const currentStudyNum = Math.max(1, count);
-      const totalStudyNum = studySteps.length;
-
-      return {
-        current: currentStudyNum,
-        total: totalStudyNum,
-        text: currentStep.type === 'study'
-          ? `Session ${currentStudyNum} / ${totalStudyNum}`
-          : `Break after Session ${currentStudyNum}`,
-        loopText: settings.repeatMode === 'count' ? `Loop ${currentLoopCount} / ${settings.targetLoops}` : ''
-      };
-    }
-  }, [settings.modeType, settings.repeatMode, settings.targetLoops, currentStepIndex, currentLoopCount, sequence, currentStep]);
+  const sessionProgressInfo = useMemo(
+    () => getProgressInfo(sequence, settings, currentStepIndex, currentLoopCount),
+    [sequence, settings, currentStepIndex, currentLoopCount]
+  );
 
   // Persist settings to localStorage
   useEffect(() => {
@@ -251,63 +234,50 @@ export function TimerProvider({ children }) {
 
   // Persist runtime state to localStorage
   useEffect(() => {
+    const serialized = serializeRunState({ status, timeLeft, targetEndTime, currentStepIndex, currentLoopCount });
+    if (serialized === savedRunStateRef.current) return;
+    savedRunStateRef.current = serialized;
+
     try {
-      localStorage.setItem(RUN_STATE_KEY, JSON.stringify({
-        status,
-        timeLeft,
-        targetEndTime: status === 'running' ? endTimeRef.current : null,
-        currentStepIndex,
-        currentLoopCount,
-        timestamp: Date.now()
-      }));
+      localStorage.setItem(RUN_STATE_KEY, serialized);
     } catch (e) {
       console.warn('Failed to save run state:', e);
     }
-  }, [status, timeLeft, currentStepIndex, currentLoopCount]);
+  }, [status, timeLeft, targetEndTime, currentStepIndex, currentLoopCount]);
 
-  const broadcastCurrentState = useCallback((overrideTimeLeft = timeLeft, overrideStatus = status) => {
-    const sessionInfo = getSessionProgressInfo();
-    const payload = {
-      timeLeft: overrideTimeLeft,
-      targetEndTime: overrideStatus === 'running' ? endTimeRef.current : null,
-      status: overrideStatus,
+  // Broadcast to the overlay whenever something it shows changes. While running
+  // the overlay follows the plan by itself (next sessions included), so the
+  // per-second timeLeft updates are not sent
+  const broadcastTimeLeft = status === 'running' ? null : timeLeft;
+
+  useEffect(() => {
+    const isRunning = status === 'running' && !!targetEndTime;
+
+    syncChannel.postState({
+      status,
+      timeLeft: broadcastTimeLeft,
+      targetEndTime: isRunning ? targetEndTime : null,
+      currentStepIndex,
+      currentLoopCount,
+      plan: {
+        modeType: settings.modeType,
+        repeatMode: settings.repeatMode,
+        targetLoops: settings.targetLoops,
+        sequence: sequence.map(({ name, type, duration }) => ({ name, type, duration })),
+      },
       sessionName: currentStep?.name || 'STUDY',
       sessionType: currentStep?.type || 'study',
-      sessionProgressText: sessionInfo.text,
-      loopProgressText: sessionInfo.loopText,
-      overlayFontSize: settingsRef.current.overlayFontSize,
-      overlayColor: settingsRef.current.overlayColor,
-      overlayLabelColor: settingsRef.current.overlayLabelColor || '#fef08a',
-      overlayLabelFontSize: settingsRef.current.overlayLabelFontSize || 36,
-      overlayShowLabel: settingsRef.current.overlayShowLabel,
-      overlayShowSessionCount: settingsRef.current.overlayShowSessionCount !== false,
-      overlayFontFamily: settingsRef.current.overlayFontFamily,
-      timestamp: Date.now()
-    };
-    syncChannel.postState(payload);
-  }, [currentStep, getSessionProgressInfo, timeLeft, status]);
-
-  // Handle page visibility changes
-  useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        tickRef.current?.();
-      }
-    };
-    
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('focus', handleVisibilityChange);
-    
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('focus', handleVisibilityChange);
-    };
-  }, []);
-
-  // Broadcast state changes
-  useEffect(() => {
-    broadcastCurrentState();
-  }, [timeLeft, status, currentStepIndex, settings, broadcastCurrentState]);
+      sessionProgressText: sessionProgressInfo.text,
+      loopProgressText: sessionProgressInfo.loopText,
+      overlayFontSize: settings.overlayFontSize,
+      overlayColor: settings.overlayColor,
+      overlayLabelColor: settings.overlayLabelColor || '#fef08a',
+      overlayLabelFontSize: settings.overlayLabelFontSize || 36,
+      overlayShowLabel: settings.overlayShowLabel,
+      overlayShowSessionCount: settings.overlayShowSessionCount !== false,
+      overlayFontFamily: settings.overlayFontFamily,
+    });
+  }, [status, broadcastTimeLeft, targetEndTime, currentStep, currentStepIndex, currentLoopCount, sequence, sessionProgressInfo, settings]);
 
   // Handle ambient audio
   useEffect(() => {
@@ -327,11 +297,25 @@ export function TimerProvider({ children }) {
     if (status === 'idle') {
       const step = sequence[currentStepIndex] || sequence[0];
       if (step) {
-        const newSeconds = step.duration * 60;
+        const newSeconds = sessionSeconds(step);
         setTimeLeft(newSeconds);
+        timeLeftRef.current = newSeconds;
       }
     }
-  }, [currentStepIndex, settings.modeType, settings.studyDuration, settings.shortBreakDuration, settings.longBreakDuration, settings.customSequence, status, sequence]);
+  }, [currentStepIndex, status, sequence]);
+
+  // Keep the tab from being frozen while a session runs
+  useEffect(() => {
+    if (status !== 'running' || !navigator.locks?.request) return undefined;
+
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    navigator.locks.request(RUNNING_LOCK, { mode: 'shared' }, () => held).catch(() => {});
+
+    return () => release();
+  }, [status]);
 
   const stopTicker = useCallback(() => {
     if (workerRef.current) {
@@ -362,149 +346,131 @@ export function TimerProvider({ children }) {
     timerRef.current = setInterval(() => tickRef.current?.(), 250);
   }, [stopTicker]);
 
-  const startTimer = useCallback((forceStart = false) => {
-    audioEngine.initContext();
+  // Single place where the run state changes: start, pause, reset, skip, a
+  // session running out, or another tab of the timer changing it
+  const commitRunState = useCallback((next) => {
+    setStatus(next.status);
+    statusRef.current = next.status;
+    setCurrentStepIndex(next.currentStepIndex);
+    currentStepIndexRef.current = next.currentStepIndex;
+    setCurrentLoopCount(next.currentLoopCount);
+    currentLoopCountRef.current = next.currentLoopCount;
+    setTimeLeft(next.timeLeft);
+    timeLeftRef.current = next.timeLeft;
+    setTargetEndTime(next.targetEndTime);
+    endTimeRef.current = next.targetEndTime;
 
-    if (statusRef.current === 'running' && !forceStart) return;
+    if (next.status === 'running') {
+      startTicker();
+    } else {
+      stopTicker();
+    }
+  }, [startTicker, stopTicker]);
 
-    setStatus('running');
-    statusRef.current = 'running';
+  // A session ran out: move on along the wall-clock schedule, where each session
+  // starts exactly when the previous one ended. If the browser froze or
+  // throttled this tab past that moment, the timer catches up instead of
+  // starting late.
+  const completeElapsedSessions = useCallback((now) => {
+    const currentSettings = settingsRef.current;
+    const seq = buildSequence(currentSettings);
+    const position = resolvePosition(
+      seq,
+      currentSettings,
+      currentStepIndexRef.current,
+      currentLoopCountRef.current,
+      endTimeRef.current,
+      now
+    );
 
-    if (!endTimeRef.current || !forceStart) {
-      endTimeRef.current = Date.now() + timeLeftRef.current * 1000;
+    // When the most recent session change happened
+    const changedAt = position.finished
+      ? position.endTime
+      : position.endTime - sessionSeconds(seq[position.index]) * 1000;
+    if (now - changedAt <= CHIME_GRACE_MS) {
+      audioEngine.playSessionChime();
     }
 
-    startTicker();
-  }, [startTicker]);
+    commitRunState(position.finished
+      ? idleAt(seq, 0, 1)
+      : runningAt(position.index, position.loop, position.endTime, now));
+  }, [commitRunState]);
+
+  // Single tick handler shared by the worker, the setInterval fallback and the
+  // wake-up handlers. State is broadcast by the effect that watches it.
+  const tick = useCallback(() => {
+    if (statusRef.current !== 'running' || !endTimeRef.current) return;
+
+    const now = Date.now();
+    if (endTimeRef.current <= now) {
+      completeElapsedSessions(now);
+      return;
+    }
+
+    const remainingSec = secondsUntil(endTimeRef.current, now);
+    setTimeLeft(remainingSec);
+    timeLeftRef.current = remainingSec;
+  }, [completeElapsedSessions]);
+
+  useEffect(() => {
+    tickRef.current = tick;
+  }, [tick]);
+
+  const startTimer = useCallback(() => {
+    audioEngine.initContext();
+
+    if (statusRef.current === 'running') return;
+
+    const now = Date.now();
+    commitRunState(runningAt(
+      currentStepIndexRef.current,
+      currentLoopCountRef.current,
+      now + timeLeftRef.current * 1000,
+      now
+    ));
+  }, [commitRunState]);
 
   const pauseTimer = useCallback(() => {
-    stopTicker();
-    setStatus('paused');
-    statusRef.current = 'paused';
-    broadcastCurrentState(timeLeftRef.current, 'paused');
-  }, [stopTicker, broadcastCurrentState]);
+    if (statusRef.current !== 'running') return;
+
+    // First catch up on a session that ended while this tab was asleep
+    tickRef.current?.();
+    if (statusRef.current !== 'running') return;
+
+    commitRunState({
+      status: 'paused',
+      timeLeft: secondsUntil(endTimeRef.current, Date.now()),
+      targetEndTime: null,
+      currentStepIndex: currentStepIndexRef.current,
+      currentLoopCount: currentLoopCountRef.current,
+    });
+  }, [commitRunState]);
 
   const resumeTimer = useCallback(() => {
     startTimer();
   }, [startTimer]);
 
   const resetTimer = useCallback(() => {
-    stopTicker();
-    setStatus('idle');
-    statusRef.current = 'idle';
-    const step = sequence[currentStepIndexRef.current] || sequence[0];
-    const initialSeconds = step ? step.duration * 60 : 50 * 60;
-    setTimeLeft(initialSeconds);
-    broadcastCurrentState(initialSeconds, 'idle');
-  }, [stopTicker, sequence, broadcastCurrentState]);
+    const seq = buildSequence(settingsRef.current);
+    const index = currentStepIndexRef.current < seq.length ? currentStepIndexRef.current : 0;
+    commitRunState(idleAt(seq, index, currentLoopCountRef.current));
+  }, [commitRunState]);
 
+  // Skip: the next session starts right now
   const skipSession = useCallback(() => {
-    stopTicker();
-    advanceToNextSession();
-  }, [stopTicker]);
+    const currentSettings = settingsRef.current;
+    const seq = buildSequence(currentSettings);
+    const next = getNextPosition(seq, currentStepIndexRef.current, currentLoopCountRef.current, currentSettings);
 
-  const advanceToNextSession = useCallback(() => {
-    const nextIndex = currentStepIndexRef.current + 1;
-    const seq = getSequence(settingsRef.current);
-
-    if (nextIndex < seq.length) {
-      setCurrentStepIndex(nextIndex);
-      currentStepIndexRef.current = nextIndex;
-      const nextStep = seq[nextIndex];
-      const nextSeconds = nextStep.duration * 60;
-      setTimeLeft(nextSeconds);
-      timeLeftRef.current = nextSeconds;
-
-      if (statusRef.current === 'running') {
-        endTimeRef.current = Date.now() + nextSeconds * 1000;
-        startTimer(true);
-      } else {
-        setStatus('idle');
-        statusRef.current = 'idle';
-      }
+    if (!next) {
+      commitRunState(idleAt(seq, 0, 1));
+    } else if (statusRef.current === 'running') {
+      const now = Date.now();
+      commitRunState(runningAt(next.index, next.loop, now + sessionSeconds(seq[next.index]) * 1000, now));
     } else {
-      if (settingsRef.current.repeatMode === 'continuous') {
-        setCurrentStepIndex(0);
-        currentStepIndexRef.current = 0;
-        setCurrentLoopCount(prev => prev + 1);
-        currentLoopCountRef.current = currentLoopCountRef.current + 1;
-        
-        const firstStep = seq[0];
-        const nextSeconds = firstStep.duration * 60;
-        setTimeLeft(nextSeconds);
-        timeLeftRef.current = nextSeconds;
-        
-        if (statusRef.current === 'running') {
-          endTimeRef.current = Date.now() + nextSeconds * 1000;
-          startTimer(true);
-        }
-      } else if (settingsRef.current.repeatMode === 'count') {
-        if (currentLoopCountRef.current < settingsRef.current.targetLoops) {
-          setCurrentStepIndex(0);
-          currentStepIndexRef.current = 0;
-          setCurrentLoopCount(prev => prev + 1);
-          currentLoopCountRef.current = currentLoopCountRef.current + 1;
-          
-          const firstStep = seq[0];
-          const nextSeconds = firstStep.duration * 60;
-          setTimeLeft(nextSeconds);
-          timeLeftRef.current = nextSeconds;
-          
-          if (statusRef.current === 'running') {
-            endTimeRef.current = Date.now() + nextSeconds * 1000;
-            startTimer(true);
-          }
-        } else {
-          setStatus('idle');
-          statusRef.current = 'idle';
-          setCurrentStepIndex(0);
-          currentStepIndexRef.current = 0;
-          setCurrentLoopCount(1);
-          currentLoopCountRef.current = 1;
-          
-          const firstStep = seq[0];
-          const finalSeconds = firstStep ? firstStep.duration * 60 : 50 * 60;
-          setTimeLeft(finalSeconds);
-          timeLeftRef.current = finalSeconds;
-        }
-      } else {
-        setStatus('idle');
-        statusRef.current = 'idle';
-        setCurrentStepIndex(0);
-        currentStepIndexRef.current = 0;
-        
-        const firstStep = seq[0];
-        const finalSeconds = firstStep ? firstStep.duration * 60 : 50 * 60;
-        setTimeLeft(finalSeconds);
-        timeLeftRef.current = finalSeconds;
-      }
+      commitRunState(idleAt(seq, next.index, next.loop));
     }
-  }, [getSequence, startTimer]);
-
-  const handleSessionComplete = useCallback(() => {
-    audioEngine.playSessionChime();
-    advanceToNextSession();
-  }, [advanceToNextSession]);
-
-  // Single tick handler shared by the worker, the setInterval fallback and the
-  // visibility handler. State is broadcast by the effect that watches timeLeft.
-  const tick = useCallback(() => {
-    if (statusRef.current !== 'running' || !endTimeRef.current) return;
-
-    const remainingMs = Math.max(0, endTimeRef.current - Date.now());
-    const remainingSec = Math.ceil(remainingMs / 1000);
-
-    setTimeLeft(remainingSec);
-
-    if (remainingSec <= 0) {
-      stopTicker();
-      handleSessionComplete();
-    }
-  }, [stopTicker, handleSessionComplete]);
-
-  useEffect(() => {
-    tickRef.current = tick;
-  }, [tick]);
+  }, [commitRunState]);
 
   // Create the Web Worker once for the lifetime of the provider. It must not be
   // recreated on re-render, otherwise the freshly started ticker is terminated.
@@ -515,9 +481,9 @@ export function TimerProvider({ children }) {
       workerRef.current = worker;
     }
 
-    // Resume a session that was still running when the page was refreshed
+    // Resume a session that was still running when the page was (re)loaded
     if (statusRef.current === 'running' && endTimeRef.current) {
-      startTimer(true);
+      startTicker();
     }
 
     return () => {
@@ -530,6 +496,66 @@ export function TimerProvider({ children }) {
       }
     };
   }, []);
+
+  // When the tab comes back (shown, unfrozen, restored or back online), catch up
+  // right away and refresh what the overlay relay has
+  useEffect(() => {
+    const catchUp = () => tickRef.current?.();
+    const wakeUp = () => {
+      catchUp();
+      syncChannel.publish();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') wakeUp();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('resume', wakeUp);
+    window.addEventListener('pageshow', wakeUp);
+    window.addEventListener('online', wakeUp);
+    window.addEventListener('focus', catchUp);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('resume', wakeUp);
+      window.removeEventListener('pageshow', wakeUp);
+      window.removeEventListener('online', wakeUp);
+      window.removeEventListener('focus', catchUp);
+    };
+  }, []);
+
+  // Another tab of the timer changed the settings or the run: follow it, so two
+  // open tabs never send the overlay conflicting states
+  useEffect(() => {
+    const handleStorage = (event) => {
+      if (!event.newValue) return;
+
+      try {
+        if (event.key === STORAGE_KEY) {
+          const nextSettings = { ...DEFAULT_SETTINGS, ...JSON.parse(event.newValue) };
+          settingsRef.current = nextSettings;
+          setSettings(nextSettings);
+        } else if (event.key === RUN_STATE_KEY) {
+          const next = resolveRunState(JSON.parse(event.newValue), settingsRef.current);
+          const current = {
+            status: statusRef.current,
+            timeLeft: timeLeftRef.current,
+            targetEndTime: endTimeRef.current,
+            currentStepIndex: currentStepIndexRef.current,
+            currentLoopCount: currentLoopCountRef.current,
+          };
+          if (serializeRunState(next) !== serializeRunState(current)) {
+            commitRunState(next);
+          }
+        }
+      } catch (err) {
+        console.warn('Ignoring unreadable state from another tab:', err);
+      }
+    };
+
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, [commitRunState]);
 
   const updateSettings = useCallback((newPartialSettings) => {
     setSettings(prev => {
@@ -553,7 +579,7 @@ export function TimerProvider({ children }) {
     resumeTimer,
     resetTimer,
     skipSession,
-    sessionProgressInfo: getSessionProgressInfo(),
+    sessionProgressInfo,
   };
 
   return <TimerContext.Provider value={value}>{children}</TimerContext.Provider>;

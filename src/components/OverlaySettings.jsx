@@ -1,13 +1,32 @@
-import React, { useState } from 'react';
+import React, { useState, useSyncExternalStore } from 'react';
 import { useTimer } from '../context/TimerContext';
+import { getSyncStatus, subscribeSyncStatus } from '../utils/syncChannel';
 import { ExternalLink, Copy, Check, Tv, Palette, Type } from 'lucide-react';
+
+const RELAY_STATUS = {
+  ok: {
+    dot: 'bg-emerald-400',
+    text: 'Live sync on: this URL works in Camo Studio, OBS and any other browser.',
+  },
+  unavailable: {
+    dot: 'bg-amber-400',
+    text: 'Live sync server unreachable: for now this URL only works in this browser.',
+  },
+  unknown: {
+    dot: 'bg-slate-500',
+    text: 'Connecting to live sync…',
+  },
+};
 
 export function OverlaySettings() {
   const { settings, updateSettings } = useTimer();
   const [copied, setCopied] = useState(false);
+  const { room, relay } = useSyncExternalStore(subscribeSyncStatus, getSyncStatus);
 
-  // Generate exact overlay URL for Camo Studio Web Capture
-  const overlayUrl = `${window.location.origin}${window.location.pathname}#/overlay`;
+  // Generate exact overlay URL for Camo Studio Web Capture / OBS. The room ties
+  // the overlay to this browser's timer on the sync relay (read-only).
+  const overlayUrl = `${window.location.origin}${window.location.pathname}#/overlay${room ? `?room=${room}` : ''}`;
+  const relayStatus = RELAY_STATUS[relay] || RELAY_STATUS.unknown;
 
   const handleOpenOverlay = () => {
     window.open(overlayUrl, 'CamoPomodoroOverlay', 'width=600,height=300,toolbar=no,menubar=no,status=no,resizable=yes');
@@ -65,6 +84,11 @@ export function OverlaySettings() {
           )}
         </button>
       </div>
+
+      <p className="flex items-center gap-2 text-xs text-slate-400 -mt-2">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${relayStatus.dot}`} />
+        <span>{relayStatus.text}</span>
+      </p>
 
       {/* Customizations Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 pt-2">
