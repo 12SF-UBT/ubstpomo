@@ -279,18 +279,11 @@ export function TimerProvider({ children }) {
     });
   }, [status, broadcastTimeLeft, targetEndTime, currentStep, currentStepIndex, currentLoopCount, sequence, sessionProgressInfo, settings]);
 
-  // Handle ambient audio
+  // Keep audio engine volume and mute in sync
   useEffect(() => {
     audioEngine.setVolume(settings.volume);
     audioEngine.setMuted(settings.isMuted);
-
-    if (status === 'running' && settings.isAmbientEnabled && !settings.isMuted) {
-      const activeSound = currentStep.type === 'study' ? settings.studySound : settings.breakSound;
-      audioEngine.startAmbient(activeSound);
-    } else {
-      audioEngine.stopAmbient();
-    }
-  }, [status, currentStep.type, settings.studySound, settings.breakSound, settings.volume, settings.isMuted, settings.isAmbientEnabled]);
+  }, [settings.volume, settings.isMuted]);
 
   // Update timeLeft when idle and step changes
   useEffect(() => {
@@ -388,7 +381,8 @@ export function TimerProvider({ children }) {
       ? position.endTime
       : position.endTime - sessionSeconds(seq[position.index]) * 1000;
     if (now - changedAt <= CHIME_GRACE_MS) {
-      audioEngine.playSessionChime();
+      const nextSession = seq[position.index] || seq[0];
+      audioEngine.playSessionChime(nextSession?.type || 'study');
     }
 
     commitRunState(position.finished

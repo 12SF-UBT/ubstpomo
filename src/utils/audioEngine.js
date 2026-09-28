@@ -1,16 +1,15 @@
 /**
  * Audio Engine for Pomodoro Timer
- * Handles ambient sounds, session chimes, volume control, and Web Audio API setup
+ * Provides rich, loud yet soothing 4-second transition alarms when sessions switch
+ * between Study and Break. Ambient sound loop system has been removed.
  */
 
 export const audioEngine = {
   context: null,
   gainNode: null,
-  oscillator: null,
-  ambientSource: null,
-  ambientGain: null,
   isMuted: false,
-  volume: 0.6,
+  volume: 0.8,
+  activeAlarmNodes: [],
   
   /**
    * Initialize Web Audio Context (must be called on user interaction)
@@ -25,7 +24,6 @@ export const audioEngine = {
         this.gainNode = this.context.createGain();
         this.gainNode.connect(this.context.destination);
         this.gainNode.gain.value = this.isMuted ? 0 : this.volume;
-        console.log('Web Audio Context initialized');
       }
     } catch (err) {
       console.warn('Web Audio API not supported:', err);
@@ -64,138 +62,155 @@ export const audioEngine = {
   },
 
   /**
-   * Start ambient background sound loop
-   * soundName: 'rain', 'waves', 'fire', 'forest', 'coffee'
+   * Stop any currently sounding alarm nodes
    */
-  startAmbient(soundName) {
-    this.initContext();
-    this.resumeContext();
-    
-    if (!this.context) return;
+  stopAlarm() {
+    if (this.activeAlarmNodes && this.activeAlarmNodes.length > 0) {
+      this.activeAlarmNodes.forEach(node => {
+        try {
+          if (node.stop) node.stop();
+          if (node.disconnect) node.disconnect();
+        } catch (e) {}
+      });
+      this.activeAlarmNodes = [];
+    }
+  },
 
-    // Stop any existing ambient
-    this.stopAmbient();
+  /**
+   * Helper to play an organic harmonic bell/chime note with rich overtones
+   */
+  playBellNote(startTime, fundamentalFreq, peakGain, duration, type = 'sine') {
+    if (!this.context || !this.gainNode) return;
 
-    try {
-      // For demo: create a simple tone loop instead of loading files
-      // In production, load actual audio files
-      const freq = this.getAmbientFrequency(soundName);
+    // Harmonic overtones: fundamental (1x), octave (2x), fifth (3x), double octave (4.2x)
+    const harmonics = [
+      { ratio: 1.0, gainMult: 0.65 },
+      { ratio: 2.0, gainMult: 0.35 },
+      { ratio: 3.0, gainMult: 0.15 },
+      { ratio: 4.2, gainMult: 0.08 }
+    ];
+
+    harmonics.forEach(({ ratio, gainMult }) => {
       const osc = this.context.createOscillator();
-      const filter = this.context.createBiquadFilter();
-      const lfo = this.context.createOscillator();
-      const lfoGain = this.context.createGain();
+      const noteGain = this.context.createGain();
 
-      // Create ambient gain for separate control
-      this.ambientGain = this.context.createGain();
-      this.ambientGain.gain.value = this.volume * 0.3; // Quieter ambient
+      osc.type = type;
+      osc.frequency.setValueAtTime(fundamentalFreq * ratio, startTime);
 
-      // LFO modulation for organic feel
-      lfo.frequency.value = 0.5;
-      lfoGain.gain.value = 50;
-      lfo.connect(lfoGain);
-      lfoGain.connect(osc.frequency);
+      // Attack (rapid rise), Decay to gentle ringing sustain, smooth fade out
+      const attackTime = 0.04;
+      const initialPeak = Math.max(0.0001, peakGain * gainMult * this.volume);
+      
+      noteGain.gain.setValueAtTime(0.0001, startTime);
+      noteGain.gain.exponentialRampToValueAtTime(initialPeak, startTime + attackTime);
+      noteGain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
 
-      // Filter for warmth
-      filter.type = 'lowpass';
-      filter.frequency.value = 300;
-      filter.Q.value = 1;
+      osc.connect(noteGain);
+      noteGain.connect(this.gainNode);
 
-      // Connect chain: osc -> filter -> gain -> destination
-      osc.connect(filter);
-      filter.connect(this.ambientGain);
-      this.ambientGain.connect(this.gainNode);
+      osc.start(startTime);
+      osc.stop(startTime + duration + 0.1);
 
-      // Start oscillators
-      osc.start();
-      lfo.start();
-
-      this.ambientSource = { osc, lfo, filter };
-      console.log(`Ambient sound started: ${soundName}`);
-    } catch (err) {
-      console.warn('Failed to start ambient sound:', err);
-    }
+      this.activeAlarmNodes.push(osc, noteGain);
+    });
   },
 
   /**
-   * Stop ambient sound
+   * 4-second transition alarm: Break -> Study (Time to Focus)
+   * Bright, uplifting, energizing Tibetan/zen chime progression (E4 -> G#4 -> B4 -> E5)
+   * Loud, distinct, yet soothing without harsh jarring buzzes.
    */
-  stopAmbient() {
-    if (this.ambientSource) {
-      try {
-        this.ambientSource.osc.stop();
-        this.ambientSource.lfo.stop();
-      } catch (err) {}
-      this.ambientSource = null;
-    }
-    if (this.ambientGain) {
-      this.ambientGain.gain.value = 0;
-    }
-  },
-
-  /**
-   * Play session completion chime
-   */
-  playSessionChime() {
+  playStudyAlarm() {
     this.initContext();
     this.resumeContext();
-    
     if (!this.context || this.isMuted) return;
 
     try {
+      this.stopAlarm();
       const now = this.context.currentTime;
-      const duration = 0.5;
+      // 4 uplifting chime strikes over 4 seconds
+      const notes = [
+        { time: 0.0,  freq: 329.63, dur: 2.2, gain: 0.85 }, // E4
+        { time: 0.85, freq: 415.30, dur: 2.2, gain: 0.90 }, // G#4
+        { time: 1.70, freq: 493.88, dur: 2.2, gain: 0.95 }, // B4
+        { time: 2.55, freq: 659.25, dur: 1.45, gain: 1.0  }, // E5 (bright finale ringing through 4.0s)
+      ];
 
-      // Create chime sound using multiple tones
-      const frequencies = [523.25, 659.25, 783.99]; // C5, E5, G5 chord
-
-      frequencies.forEach((freq, idx) => {
-        const osc = this.context.createOscillator();
-        const env = this.context.createGain();
-
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-
-        // Exponential decay envelope
-        env.gain.setValueAtTime(this.volume * 0.5, now);
-        env.gain.exponentialRampToValueAtTime(0.01, now + duration);
-
-        osc.connect(env);
-        env.connect(this.gainNode);
-
-        osc.start(now + idx * 0.05);
-        osc.stop(now + duration + idx * 0.05);
+      notes.forEach(({ time, freq, dur, gain }) => {
+        this.playBellNote(now + time, freq, gain, dur, 'sine');
       });
 
-      console.log('Session chime played');
+      console.log('Study transition alarm played (4s)');
     } catch (err) {
-      console.warn('Failed to play chime:', err);
+      console.warn('Failed to play study alarm:', err);
     }
   },
 
   /**
-   * Get ambient frequency for different sounds
+   * 4-second transition alarm: Study -> Break (Time to Rest)
+   * Calming, warm, relaxing descending singing-bowl sequence (A4 -> F#4 -> D4 -> A3)
+   * Loud, reassuring, and very soothing.
    */
-  getAmbientFrequency(soundName) {
-    const frequencies = {
-      rain: 110,      // A2 - low, calming
-      waves: 55,      // A1 - very low, oceanic
-      fire: 220,      // A3 - medium, warming
-      forest: 165,    // E3 - nature-like
-      coffee: 146,    // D3 - cozy, cafe-like
-    };
-    return frequencies[soundName] || 110;
+  playBreakAlarm() {
+    this.initContext();
+    this.resumeContext();
+    if (!this.context || this.isMuted) return;
+
+    try {
+      this.stopAlarm();
+      const now = this.context.currentTime;
+      // 4 warm relaxing chime strikes over 4 seconds
+      const notes = [
+        { time: 0.0,  freq: 440.00, dur: 2.2, gain: 0.90 }, // A4
+        { time: 0.85, freq: 369.99, dur: 2.2, gain: 0.90 }, // F#4
+        { time: 1.70, freq: 293.66, dur: 2.2, gain: 0.95 }, // D4
+        { time: 2.55, freq: 220.00, dur: 1.45, gain: 1.0  }, // A3 (deep relaxing resonance to 4.0s)
+      ];
+
+      notes.forEach(({ time, freq, dur, gain }) => {
+        this.playBellNote(now + time, freq, gain, dur, 'triangle');
+      });
+
+      console.log('Break transition alarm played (4s)');
+    } catch (err) {
+      console.warn('Failed to play break alarm:', err);
+    }
   },
+
+  /**
+   * Generic trigger based on next session type ('study' or 'break')
+   */
+  playTransitionAlarm(nextSessionType) {
+    if (nextSessionType === 'break') {
+      this.playBreakAlarm();
+    } else {
+      this.playStudyAlarm();
+    }
+  },
+
+  /**
+   * Backward compatibility for session chime
+   */
+  playSessionChime(nextSessionType = 'study') {
+    this.playTransitionAlarm(nextSessionType);
+  },
+
+  /**
+   * Stop ambient sound (no-op for compatibility)
+   */
+  startAmbient() {},
+  stopAmbient() {},
 
   /**
    * Cleanup: stop all audio
    */
   cleanup() {
-    this.stopAmbient();
-    if (this.oscillator) {
+    this.stopAlarm();
+    if (this.context && this.context.state !== 'closed') {
       try {
-        this.oscillator.stop();
+        this.context.close();
       } catch (err) {}
-      this.oscillator = null;
+      this.context = null;
     }
   }
 };
