@@ -67,7 +67,12 @@ const lastLoop = (plan) => {
 export const getProgressInfo = (seq, plan, index, loop) => {
   const loopText = plan.repeatMode === 'count' ? `Loop ${loop} / ${plan.targetLoops}` : '';
 
-  if (plan.modeType === 'custom') {
+  const studySessions = seq.filter(s => s.type === 'study');
+  const total = studySessions.length;
+  const currentStep = seq[index] || seq[0];
+
+  // If there are no study sessions defined at all, fallback safely
+  if (total === 0) {
     return {
       current: index + 1,
       total: seq.length,
@@ -76,16 +81,27 @@ export const getProgressInfo = (seq, plan, index, loop) => {
     };
   }
 
-  const step = seq[index] || seq[0];
-  const total = seq.filter(s => s.type === 'study').length;
-  const current = Math.max(1, seq.slice(0, index + 1).filter(s => s.type === 'study').length);
+  // Count how many study sessions have occurred up to and including this step
+  const studiesSoFar = seq.slice(0, index + 1).filter(s => s.type === 'study').length;
 
-  return {
-    current,
-    total,
-    text: step.type === 'study' ? `Session ${current} / ${total}` : `Break after Session ${current}`,
-    loopText,
-  };
+  if (currentStep.type === 'study') {
+    const current = Math.max(1, studiesSoFar);
+    return {
+      current,
+      total,
+      text: `Session ${current} / ${total}`,
+      loopText,
+    };
+  } else {
+    // For break sessions, relate it to the previous study session
+    const prevStudyNum = studiesSoFar;
+    return {
+      current: prevStudyNum,
+      total,
+      text: prevStudyNum > 0 ? `Break after Session ${prevStudyNum}` : 'Break',
+      loopText,
+    };
+  }
 };
 
 // Follows the run forward from session `index` of loop `loop`, which ends at
