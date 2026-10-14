@@ -29,7 +29,7 @@ export function OverlaySettings() {
   const relayStatus = RELAY_STATUS[relay] || RELAY_STATUS.unknown;
 
   const handleOpenOverlay = () => {
-    window.open(overlayUrl, 'CamoPomodoroOverlay', 'width=600,height=300,toolbar=no,menubar=no,status=no,resizable=yes');
+    window.open(overlayUrl, 'CamoPomodoroOverlay', 'width=540,height=260,toolbar=no,menubar=no,status=no,resizable=yes');
   };
 
   const handleCopyUrl = () => {
@@ -43,20 +43,23 @@ export function OverlaySettings() {
       <div className="flex items-center justify-between border-b border-slate-800 pb-4">
         <div className="flex items-center gap-2 text-indigo-400 font-bold text-lg">
           <Tv className="w-5 h-5" />
-          <span>Camo Studio Overlay Mode</span>
+          <span>Camo & Desktop Always-On-Top Overlay</span>
         </div>
 
-        <button
-          onClick={handleOpenOverlay}
-          className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-indigo-500/25 transition-all active:scale-95"
-        >
-          <ExternalLink className="w-4 h-4" />
-          <span>OPEN OVERLAY</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleOpenOverlay}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-400 hover:to-purple-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-indigo-500/25 transition-all active:scale-95"
+            title="Open overlay window. In the overlay window, click 'Always On Top' to stay on top of all apps, games, and websites!"
+          >
+            <ExternalLink className="w-4 h-4" />
+            <span>OPEN OVERLAY</span>
+          </button>
+        </div>
       </div>
 
       <p className="text-slate-400 text-xs leading-relaxed">
-        Overlay Mode is designed with a transparent background for Camo Studio Web Capture. Load this URL into Camo Studio as a Web Layer:
+        Overlay Mode floats transparently for Camo Studio / OBS, or click <strong>Always On Top</strong> inside the overlay window to pin it over all apps and websites in Windows:
       </p>
 
       {/* Copy URL Input Group */}

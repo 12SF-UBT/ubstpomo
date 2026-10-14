@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { syncChannel, getRoomFromUrl, getStoredRoom } from '../utils/syncChannel';
 import { getProgressInfo, resolvePosition, secondsUntil, sessionSeconds } from '../utils/timeline';
+import { PictureInPicture, X } from 'lucide-react';
 
 const STORAGE_KEY = 'ubst_pomo_settings_v1';
 
@@ -102,11 +103,15 @@ export function OverlayView() {
     return defaults;
   });
 
-  // The URL's room, or this browser's own timer when the overlay was opened
-  // here without one
   const [room] = useState(() => getRoomFromUrl() || getStoredRoom());
   const [hasTimer, setHasTimer] = useState(false);
   const [waitedForTimer, setWaitedForTimer] = useState(false);
+  const [isPipActive, setIsPipActive] = useState(false);
+
+  const canvasRef = useRef(null);
+  const videoRef = useRef(null);
+  const pipWindowRef = useRef(null);
+  const containerRef = useRef(null);
 
   // Set transparent background on mount
   useEffect(() => {
@@ -173,7 +178,6 @@ export function OverlayView() {
           overlayFontFamily: data.overlayFontFamily || prev.overlayFontFamily,
         };
 
-        // Only update if something changed
         if (JSON.stringify(nextState) === JSON.stringify(prev)) {
           return prev;
         }
@@ -196,79 +200,233 @@ export function OverlayView() {
     .replace(' / ', '/')
     .replace('Break after ', 'Break ');
 
-  // An old overlay link (no room) in OBS / Camo can't reach the timer
+  // Update canvas continuously so video-based PiP stream stays in perfect real-time sync
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear with dark sleek translucent background for PiP window
+    ctx.fillStyle = '#090d16';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Subtle glow border inside canvas
+    ctx.strokeStyle = 'rgba(99, 102, 241, 0.4)';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+
+    // Draw Session Badge
+    if (overlayState.overlayShowLabel) {
+      ctx.fillStyle = overlayState.overlayLabelColor || '#fef08a';
+      ctx.font = 'bold 24px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+      ctx.textAlign = 'center';
+      const labelText = overlayState.overlayShowSessionCount
+        ? `${sessionName || 'STUDY'} • ${cleanSessionCount}`
+        : (sessionName || 'STUDY');
+      ctx.fillText(labelText, canvas.width / 2, 48);
+    }
+
+    // Draw Main Big Countdown
+    ctx.fillStyle = overlayState.overlayColor || '#ffffff';
+    ctx.font = 'bold 84px monospace, "Courier New"';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(formattedTime, canvas.width / 2, canvas.height / 2 + 18);
+  }, [formattedTime, sessionName, cleanSessionCount, overlayState]);
+
+  // Request Native Always-On-Top Picture-in-Picture
+  const toggleAlwaysOnTop = async () => {
+    try {
+      // 1. Try modern Document Picture-in-Picture API (Supported on Chrome/Edge on Windows)
+      if (window.documentPictureInPicture && window.documentPictureInPicture.requestWindow) {
+        if (pipWindowRef.current) {
+          pipWindowRef.current.close();
+          pipWindowRef.current = null;
+          setIsPipActive(false);
+          return;
+        }
+
+        const pipWindow = await window.documentPictureInPicture.requestWindow({
+          width: 380,
+          height: 180,
+        });
+
+        // Copy styles to Document PiP window
+        [...document.styleSheets].forEach((styleSheet) => {
+          try {
+            const cssRules = [...styleSheet.cssRules].map((rule) => rule.cssText).join('');
+            const style = document.createElement('style');
+            style.textContent = cssRules;
+            pipWindow.document.head.appendChild(style);
+          } catch (e) {
+            const link = document.createElement('link');
+            if (styleSheet.href) {
+              link.rel = 'stylesheet';
+              link.type = styleSheet.type;
+              link.media = styleSheet.media;
+              link.href = styleSheet.href;
+              pipWindow.document.head.appendChild(link);
+            }
+          }
+        });
+
+        pipWindow.document.body.style.backgroundColor = '#020617';
+        pipWindow.document.body.style.margin = '0';
+        pipWindow.document.body.style.display = 'flex';
+        pipWindow.document.body.style.alignItems = 'center';
+        pipWindow.document.body.style.justifyContent = 'center';
+        pipWindow.document.body.style.height = '100vh';
+        pipWindow.document.body.style.overflow = 'hidden';
+
+        if (containerRef.current) {
+          pipWindow.document.body.appendChild(containerRef.current);
+        }
+
+        pipWindow.addEventListener('pagehide', () => {
+          if (containerRef.current) {
+            document.body.appendChild(containerRef.current);
+          }
+          pipWindowRef.current = null;
+          setIsPipActive(false);
+        });
+
+        pipWindowRef.current = pipWindow;
+        setIsPipActive(true);
+        return;
+      }
+
+      // 2. Fallback to Video Picture-in-Picture (Available everywhere)
+      if (videoRef.current && canvasRef.current) {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+          setIsPipActive(false);
+          return;
+        }
+
+        if (!videoRef.current.srcObject) {
+          const stream = canvasRef.current.captureStream(30);
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play();
+        }
+
+        await videoRef.current.requestPictureInPicture();
+        setIsPipActive(true);
+
+        videoRef.current.addEventListener('leavepictureinpicture', () => {
+          setIsPipActive(false);
+        }, { once: true });
+      }
+    } catch (err) {
+      console.warn('Could not launch Picture-in-Picture always-on-top:', err);
+    }
+  };
+
   const showLinkHint = !room && !hasTimer && waitedForTimer;
 
   return (
-    <div
-      className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4"
-      style={{
-        backgroundColor: 'transparent',
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        zIndex: 9999,
-      }}
-    >
-      {/* Large Timer Digits */}
-      <div
-        className={`font-bold tracking-tight leading-none transition-all duration-150 ${
-          overlayState.overlayFontFamily === 'mono' ? 'font-mono' : 'font-sans'
-        }`}
-        style={{
-          fontSize: `${overlayState.overlayFontSize}px`,
-          color: overlayState.overlayColor,
-          textShadow: [
-            '0 4px 16px rgba(0,0,0,0.95)',
-            '0 2px 4px rgba(0,0,0,0.8)',
-            '0 0 20px rgba(0,0,0,0.5)'
-          ].join(','),
-          textAlign: 'center',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {formattedTime}
+    <>
+      {/* Hidden canvas and video for video-based always-on-top PiP fallback */}
+      <canvas ref={canvasRef} width="400" height="200" className="hidden" />
+      <video ref={videoRef} muted playsInline className="hidden" />
+
+      {/* Floating Action Button for Always-On-Top Pinning */}
+      <div className="fixed top-3 right-3 z-[10000] flex items-center gap-2 group opacity-40 hover:opacity-100 transition-opacity">
+        <button
+          onClick={toggleAlwaysOnTop}
+          title={isPipActive ? "Cancel Always On Top" : "Pin Always on Top over all apps and websites (Picture-in-Picture)"}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold backdrop-blur-md shadow-lg border transition-all active:scale-95 ${
+            isPipActive
+              ? 'bg-rose-600/90 hover:bg-rose-500 text-white border-rose-400/50'
+              : 'bg-indigo-600/80 hover:bg-indigo-500 text-white border-indigo-400/40'
+          }`}
+        >
+          {isPipActive ? (
+            <>
+              <X className="w-3.5 h-3.5" />
+              <span>Cancel Forefront</span>
+            </>
+          ) : (
+            <>
+              <PictureInPicture className="w-3.5 h-3.5" />
+              <span>Always On Top</span>
+            </>
+          )}
+        </button>
       </div>
 
-      {/* Session Label & Progress Counter */}
-      {(overlayState.overlayShowLabel || overlayState.overlayShowSessionCount) && (
+      <div
+        ref={containerRef}
+        className="w-screen h-screen flex flex-col items-center justify-center select-none overflow-hidden bg-transparent p-4"
+        style={{
+          backgroundColor: 'transparent',
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 9999,
+        }}
+      >
+        {/* Large Timer Digits */}
         <div
-          className="font-medium tracking-normal mt-2 transition-all duration-150 text-center flex items-center justify-center gap-2 flex-wrap"
+          className={`font-bold tracking-tight leading-none transition-all duration-150 ${
+            overlayState.overlayFontFamily === 'mono' ? 'font-mono' : 'font-sans'
+          }`}
           style={{
-            fontSize: `${overlayState.overlayLabelFontSize}px`,
-            color: overlayState.overlayLabelColor || '#fef08a',
+            fontSize: `${overlayState.overlayFontSize}px`,
+            color: overlayState.overlayColor,
             textShadow: [
-              '0 3px 10px rgba(0,0,0,0.95)',
-              '0 1px 3px rgba(0,0,0,0.9)',
-              '0 0 12px rgba(0,0,0,0.7)'
+              '0 4px 16px rgba(0,0,0,0.95)',
+              '0 2px 4px rgba(0,0,0,0.8)',
+              '0 0 20px rgba(0,0,0,0.5)'
             ].join(','),
-            fontFamily: 'Georgia, Cambria, "Times New Roman", Times, serif',
+            textAlign: 'center',
+            whiteSpace: 'nowrap',
           }}
         >
-          {overlayState.overlayShowLabel && (
-            <span>{sessionName || 'STUDY'}</span>
-          )}
-
-          {overlayState.overlayShowLabel && overlayState.overlayShowSessionCount && (
-            <span className="opacity-70">•</span>
-          )}
-
-          {overlayState.overlayShowSessionCount && (
-            <span>{cleanSessionCount || 'Session 1/4'}</span>
-          )}
+          {formattedTime}
         </div>
-      )}
 
-      {showLinkHint && (
-        <div
-          className="mt-4 text-center text-sm font-semibold text-white"
-          style={{ textShadow: '0 1px 4px rgba(0,0,0,0.95)' }}
-        >
-          Not linked to a timer. Copy the overlay URL from the timer page again.
-        </div>
-      )}
-    </div>
+        {/* Session Label & Progress Counter */}
+        {(overlayState.overlayShowLabel || overlayState.overlayShowSessionCount) && (
+          <div
+            className="font-medium tracking-normal mt-2 transition-all duration-150 text-center flex items-center justify-center gap-2 flex-wrap"
+            style={{
+              fontSize: `${overlayState.overlayLabelFontSize}px`,
+              color: overlayState.overlayLabelColor || '#fef08a',
+              textShadow: [
+                '0 3px 10px rgba(0,0,0,0.95)',
+                '0 1px 3px rgba(0,0,0,0.9)',
+                '0 0 12px rgba(0,0,0,0.7)'
+              ].join(','),
+              fontFamily: 'Georgia, Cambria, "Times New Roman", Times, serif',
+            }}
+          >
+            {overlayState.overlayShowLabel && (
+              <span>{sessionName || 'STUDY'}</span>
+            )}
+
+            {overlayState.overlayShowLabel && overlayState.overlayShowSessionCount && (
+              <span className="opacity-70">•</span>
+            )}
+
+            {overlayState.overlayShowSessionCount && (
+              <span>{cleanSessionCount || 'Session 1/4'}</span>
+            )}
+          </div>
+        )}
+
+        {showLinkHint && (
+          <div
+            className="mt-4 text-center text-sm font-semibold text-white"
+            style={{ textShadow: '0 1px 4px rgba(0,0,0,0.95)' }}
+          >
+            Not linked to a timer. Copy the overlay URL from the timer page again.
+          </div>
+        )}
+      </div>
+    </>
   );
 }
+
